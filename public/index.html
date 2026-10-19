@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      name="description"
+      content="An open-source UK settlement evidence planner with official route signposts, travel records and review checklists."
+    />
+    <title>Settlement Planner UK</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="#home"
+        ><span class="mark">SP</span>Settlement Planner <b>UK</b></a
+      >
+      <nav aria-label="Main">
+        <a href="#routes">Routes</a><a href="#plans">Pricing</a
+        ><a href="#workspace">Workspace</a><button id="signIn">Sign in</button>
+      </nav>
+    </header>
+    <main id="home">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">YOUR RECORDS. A CLEARER PLAN.</p>
+          <h1>Bring your settlement<br />evidence together.</h1>
+          <p class="lead">
+            Find your route. Record your dates. Keep track of what is verified
+            and what still needs checking.
+          </p>
+          <div class="actions">
+            <a class="button" href="#workspace" id="demoLink"
+              >Explore the fictional demo <span>↗</span></a
+            ><a class="textlink" href="#routes">Find a route ↓</a>
+          </div>
+          <p class="small">
+            Independent, open-source planning software. No connection to the
+            Home Office.
+          </p>
+        </div>
+        <aside class="paper">
+          <div class="paper-top">
+            <span class="dot"></span> FICTIONAL EXAMPLE <span>01 / 03</span>
+          </div>
+          <h2>A record you can review.</h2>
+          <div class="sample-row">
+            <span>Permission history</span><strong>To check</strong>
+          </div>
+          <div class="sample-row">
+            <span>Travel record</span
+            ><strong class="green">Evidence linked</strong>
+          </div>
+          <div class="sample-row">
+            <span>Application readiness</span><strong>Not assessed</strong>
+          </div>
+          <p>Every fact has a source.<br />Every gap has a next action.</p>
+          <div class="paper-foot">ORGANISE → RECONCILE → REVIEW</div>
+        </aside>
+      </section>
+      <section class="strip">
+        <div><b id="routeCount">33</b> catalogue entries</div>
+        <div><b>19 Oct 2026</b> source review</div>
+        <div><b>£1 / month</b> hosted workspace</div>
+        <div><b>£5 once</b> offline download</div>
+      </section>
+      <section id="routes">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">START WITH THE RIGHT GUIDANCE</p>
+            <h2>Explore settlement routes</h2>
+          </div>
+          <label
+            >Search route or category<input
+              id="routeSearch"
+              type="search"
+              placeholder="Try Student, family or Skilled Worker"
+          /></label>
+        </div>
+        <p class="muted">
+          A broad catalogue based on GOV.UK’s settlement index. Special and
+          transitional provisions may need separate review. Only long residence
+          includes automated absence indicators. No route receives an
+          eligibility decision.
+        </p>
+        <div id="routesList" class="route-grid"></div>
+      </section>
+      <section id="plans" class="pricing">
+        <div>
+          <p class="eyebrow">CHOOSE HOW YOU KEEP YOUR RECORDS</p>
+          <h2>Simple prices.<br />Clear boundaries.</h2>
+          <p>
+            The source code is public and free to self-host. These prices are
+            for the packaged download and the operated hosted service.
+          </p>
+        </div>
+        <article>
+          <span class="tag">KEEP ON YOUR COMPUTER</span>
+          <h3>Offline planner</h3>
+          <p class="price">£5 <small>one-off</small></p>
+          <p>
+            A standalone HTML planner with travel and permission records,
+            evidence references and JSON backup. Keep your purchased copy;
+            updates are not guaranteed.
+          </p>
+          <button data-buy="download">Buy download</button
+          ><small>No hosted subscription included.</small>
+        </article>
+        <article>
+          <span class="tag">SAVE TO YOUR ACCOUNT</span>
+          <h3>Hosted workspace</h3>
+          <p class="price">£1 <small>/ month</small></p>
+          <p>
+            An account-based workspace. Cancel through the billing portal.
+            Export or delete your saved records after cancellation; saving
+            requires an active subscription.
+          </p>
+          <button data-buy="monthly">Subscribe monthly</button
+          ><small>Offline download is a separate purchase.</small>
+        </article>
+      </section>
+      <section id="workspace">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">FROM DATES TO SUPPORTING EVIDENCE</p>
+            <h2>Your planning workspace</h2>
+          </div>
+          <span id="mode" class="tag">FICTIONAL DEMO · NOT SAVED</span>
+        </div>
+        <p id="accountStatus" class="notice">Loading account availability…</p>
+        <div class="toolbar">
+          <button id="loadDemo">Reset fictional demo</button
+          ><button id="save">Save to account</button
+          ><button id="export">Export JSON backup</button
+          ><label class="file-button"
+            >Import backup<input
+              id="import"
+              type="file"
+              accept="application/json,.json" /></label
+          ><button id="download">Download purchased planner</button
+          ><button id="portal">Manage subscription</button
+          ><button id="delete">Delete saved workspace</button
+          ><button id="signOut">Sign out</button>
+        </div>
+        <p id="message" role="status" aria-live="polite"></p>
+        <label>Planning route<select id="route"></select></label>
+        <p id="routeNote" class="notice"></p>
+        <div class="tabs" role="group" aria-label="Workspace sections">
+          <button data-tab="trips" class="selected">1. Absences</button
+          ><button data-tab="permissions">2. Permissions</button
+          ><button data-tab="checks">3. Evidence review</button>
+        </div>
+        <div id="editor"></div>
+        <div id="indicators"></div>
+        <p class="small">
+          Use document references and storage locations. Do not enter passport
+          numbers, upload identity documents, or record sensitive case
+          narratives. Evidence review labels are your own assessments.
+        </p>
+      </section>
+      <section class="boundaries">
+        <div>
+          <p class="eyebrow">BUILT FOR TRACEABILITY</p>
+          <h2>Know what the planner can tell you.</h2>
+        </div>
+        <p>
+          Records and arithmetic can help you prepare. They do not establish
+          lawful residence, assess exceptions, or decide whether an application
+          will succeed. Rules can change. Check the official guidance for your
+          intended application date and obtain regulated advice where needed.
+        </p>
+        <div>
+          <a href="https://www.gov.uk/indefinite-leave-to-remain"
+            >Official settlement guidance ↗</a
+          ><br /><a href="https://www.gov.uk/guidance/immigration-rules"
+            >Immigration Rules ↗</a
+          >
+        </div>
+      </section>
+      <section id="terms">
+        <h2>Purchase terms and data handling</h2>
+        <p id="operator"></p>
+        <p>
+          The advertised prices are £5 for one offline download and £1 per month
+          for hosted saving. Checkout must show the same GBP amount. Monthly
+          billing renews until cancelled through Manage subscription; access
+          continues while the subscription remains active. Export is available
+          without an active subscription.
+        </p>
+        <p>
+          The download is supplied after payment and can be kept on your device.
+          This release does not request early loss of cancellation rights.
+          Statutory rights are unaffected. Contact the operator for
+          cancellation, refund, correction or account deletion requests. Paid
+          launch requires the operator’s complete business details,
+          cancellation/refund process and privacy notice to be published and
+          reviewed.
+        </p>
+        <p>
+          Hosted account email is processed by Supabase; payment details are
+          processed by Stripe. The app stores your workspace and a payment
+          customer reference in Supabase. Demo records stay in memory until you
+          export them. The offline version stores records in your browser and
+          offers backups. No analytics or advertising cookies are included.
+          Personal documents are not uploaded. Production retention, lawful
+          basis, processor agreements, support and deletion timeframes must be
+          completed by the operator before accepting real users.
+        </p>
+        <p class="notice" id="launchState">
+          Pre-launch software — account and payment activation pending.
+        </p>
+      </section>
+    </main>
+    <footer>
+      <span class="brand">Settlement Planner UK</span
+      ><span>v0.1 · Open source · Independent planning software</span
+      ><a href="#home">Back to top ↑</a>
+    </footer>
+    <dialog id="auth">
+      <form id="authForm">
+        <button
+          type="button"
+          id="closeAuth"
+          class="close"
+          aria-label="Close sign in"
+        >
+          ×
+        </button>
+        <p class="eyebrow">YOUR PRIVATE WORKSPACE</p>
+        <h2>Sign in by email</h2>
+        <label
+          >Email<input
+            id="email"
+            type="email"
+            autocomplete="email"
+            required /></label
+        ><label
+          >Email code (after requesting)<input
+            id="code"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            pattern="[0-9]{6,10}"
+        /></label>
+        <div class="actions">
+          <button type="button" id="sendCode">Send code</button
+          ><button type="submit">Verify code</button>
+        </div>
+        <p id="authMessage" role="status"></p>
+      </form>
+    </dialog>
+    <dialog id="purchase">
+      <form method="dialog">
+        <h2 id="purchaseTitle">Review your purchase</h2>
+        <p id="purchaseText"></p>
+        <p>
+          Read the
+          <a href="#terms" id="termsLink">purchase terms and data handling</a>.
+          Your statutory rights are unaffected. This is independent planning
+          software, not an immigration assessment.
+        </p>
+        <label class="checkbox"
+          ><input id="acceptTerms" type="checkbox" /> I accept the purchase
+          terms and recurring billing where selected.</label
+        >
+        <div class="actions">
+          <button type="button" id="checkout">
+            Continue to secure checkout</button
+          ><button>Cancel</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
