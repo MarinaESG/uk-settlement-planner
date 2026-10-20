@@ -26,6 +26,27 @@ export function createApp(env = process.env, request = fetch) {
   const publishableKey = env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY;
   const secretKey = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
   const authReady = !!(env.SUPABASE_URL && publishableKey && secretKey);
+  const privatePreview = env.PRIVATE_PREVIEW_ENABLED === "true";
+  const normaliseEmail = (email) =>
+    typeof email === "string" ? email.trim().toLowerCase() : "";
+  const previewEmails = new Set(
+    (env.PREVIEW_ALLOWED_EMAILS || "")
+      .split(",")
+      .map(normaliseEmail)
+      .filter(Boolean),
+  );
+  if (privatePreview) {
+    if (
+      !authReady ||
+      !previewEmails.size ||
+      [...previewEmails].some(
+        (email) => email.length > 254 || !/^\S+@\S+\.\S+$/.test(email),
+      )
+    )
+      throw Error("Private preview requires connected accounts and a valid email allowlist.");
+    if (env.COMMERCE_ENABLED === "true" || sandboxCheckout)
+      throw Error("Private preview requires payments and sandbox checkout to be disabled.");
+  }
   // Opaque secret keys use apikey; only legacy JWT keys belong in Bearer.
   const databaseHeaders = {
     apikey: secretKey,
@@ -49,6 +70,13 @@ export function createApp(env = process.env, request = fetch) {
     const e = Error(message);
     e.status = status;
     throw e;
+  }
+  function checkPreviewIdentity(u) {
+    if (
+      privatePreview &&
+      (!u?.email_confirmed_at || !previewEmails.has(normaliseEmail(u.email)))
+    )
+      fail(403, "This account does not have access to the private preview.");
   }
   async function remote(url, options = {}) {
     const r = await request(url, {
@@ -98,6 +126,7 @@ export function createApp(env = process.env, request = fetch) {
     if (!r.ok) fail(401, "Your session has expired. Sign in again.");
     const u = await r.json();
     if (!/^[a-f0-9-]{36}$/.test(u.id || "")) fail(401, "Invalid account.");
+    checkPreviewIdentity(u);
     return u;
   }
   async function customer(u, create = false) {
@@ -222,6 +251,7 @@ export function createApp(env = process.env, request = fetch) {
       if (path === "/api/config" && req.method === "GET")
         return send(200, {
           authReady,
+          privatePreview,
           commerce,
           sandboxCheckout,
           operator: env.OPERATOR_NAME || "Operator not configured",
@@ -246,12 +276,15 @@ export function createApp(env = process.env, request = fetch) {
         if (!authReady) fail(503, "Accounts are not connected yet.");
         limited(req, "otp");
         const d = JSON.parse((await body(req)).toString());
+        const email = normaliseEmail(d.email);
         if (
           typeof d.email !== "string" ||
-          d.email.length > 254 ||
-          !/^\S+@\S+\.\S+$/.test(d.email)
+          email.length > 254 ||
+          !/^\S+@\S+\.\S+$/.test(email)
         )
           fail(400, "Enter a valid email address.");
+        if (privatePreview && !previewEmails.has(email))
+          fail(403, "This email address is not invited to the private preview.");
         const verifying = typeof d.token === "string";
         if (verifying && !/^\d{6,10}$/.test(d.token))
           fail(400, "Enter the code from your email.");
@@ -265,11 +298,12 @@ export function createApp(env = process.env, request = fetch) {
             },
             body: JSON.stringify(
               verifying
-                ? { email: d.email, token: d.token, type: "email" }
-                : { email: d.email, create_user: true },
+                ? { email, token: d.token, type: "email" }
+                : { email, create_user: true },
             ),
           },
         );
+        if (verifying) checkPreviewIdentity(r.user);
         return send(
           200,
           verifying
@@ -289,14 +323,21 @@ export function createApp(env = process.env, request = fetch) {
           });
         }
         if (path === "/api/workspace" && req.method === "POST") {
-          if (!commerce || !(await monthly(await customer(u))))
+          if (
+            !privatePreview &&
+            (!commerce || !(await monthly(await customer(u))))
+          )
             fail(
               402,
               "An active £1 monthly subscription is required to save the hosted workspace.",
             );
-          const data = validateWorkspace(
-            JSON.parse((await body(req)).toString()),
-          );
+          const submitted = JSON.parse((await body(req)).toString());
+          let data;
+          try {
+            data = validateWorkspace(submitted);
+          } catch (e) {
+            fail(400, e.message);
+          }
           await remote(
             env.SUPABASE_URL + "/rest/v1/workspaces?on_conflict=user_id",
             {

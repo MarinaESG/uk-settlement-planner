@@ -62,7 +62,7 @@
       <section class="strip">
         <div><b id="routeCount">33</b> catalogue entries</div>
         <div><b>19 Oct 2026</b> source review</div>
-        <div><b>£1 / month</b> hosted workspace</div>
+        <div><b id="hostedSummary">£1 / month</b> hosted workspace</div>
         <div><b>£5 once</b> offline download</div>
       </section>
       <section id="routes">
@@ -90,7 +90,7 @@
         <div>
           <p class="eyebrow">CHOOSE HOW YOU KEEP YOUR RECORDS</p>
           <h2>Simple prices.<br />Clear boundaries.</h2>
-          <p>
+          <p id="plansIntro">
             The source code is public and free to self-host. These prices are
             for the packaged download and the operated hosted service.
           </p>
@@ -110,8 +110,8 @@
         <article>
           <span class="tag">SAVE TO YOUR ACCOUNT</span>
           <h3>Hosted workspace</h3>
-          <p class="price">£1 <small>/ month</small></p>
-          <p>
+          <p id="hostedPrice" class="price">£1 <small>/ month</small></p>
+          <p id="hostedDescription">
             An account-based workspace. Cancel through the billing portal.
             Export or delete your saved records after cancellation; saving
             requires an active subscription.
@@ -181,7 +181,7 @@
       <section id="terms">
         <h2>Purchase terms and data handling</h2>
         <p id="operator"></p>
-        <p>
+        <p id="billingTerms">
           The advertised prices are £5 for one offline download and £1 per month
           for hosted saving. Checkout must show the same GBP amount. Monthly
           billing renews until cancelled through Manage subscription; access
@@ -197,7 +197,7 @@
           cancellation/refund process and privacy notice to be published and
           reviewed.
         </p>
-        <p>
+        <p id="dataHandling">
           Hosted account email is processed by Supabase; payment details are
           processed by Stripe. The app stores your workspace and a payment
           customer reference in Supabase. Demo records stay in memory until you
@@ -229,6 +229,7 @@
         </button>
         <p class="eyebrow">YOUR PRIVATE WORKSPACE</p>
         <h2>Sign in by email</h2>
+        <p id="authHint">Enter your email address to request a sign-in code.</p>
         <label
           >Email<input
             id="email"

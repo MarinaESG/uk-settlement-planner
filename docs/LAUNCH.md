@@ -32,6 +32,30 @@ For initial local email tests, set Site URL and `APP_ORIGIN` to `http://localhos
 
 Sessions are stored in browser session storage. There is no automatic refresh: an expired session requires a new email code. The app never sends workspace records to Stripe. Deleting a workspace does not delete the Supabase identity or legally required payment records; the operator must provide a separate full-account request process.
 
+### Invitation-only preview without payments
+
+Use a separate Supabase preview project so local Stripe sandbox tests remain isolated. Apply the schema and email setup above. Use fictional workspace records until the public service and privacy arrangements are complete.
+
+Set these **server-side hosting settings** after deploying the preview controls:
+
+```text
+APP_ORIGIN=https://mysettlementrecord.co.uk
+COMMERCE_ENABLED=false
+STRIPE_SANDBOX_CHECKOUT=false
+PRIVATE_PREVIEW_ENABLED=true
+PREVIEW_ALLOWED_EMAILS=owner@example.com,tester@example.com
+```
+
+Replace the fictional email examples with only the operator-approved addresses. Do not commit those addresses or credentials. Supply the three Supabase settings from the preview project. Leave Stripe keys and price IDs unset. The server refuses to start if preview mode lacks an email allowlist or account settings, or if either payment mode is enabled alongside it.
+
+In this mode, sign-in requests and code verification are restricted by the email allowlist. Every workspace request also checks the **verified email returned by Supabase**, including existing sessions. Reads, saving and deletion use only that verified account's user ID. Saving does not call Stripe or create a subscription. Removing an address and redeploying revokes its next server request; offer a backup export before planned removal. Switching preview mode off with commerce still disabled restores the existing subscription gate on saving; it does not enable billing.
+
+The allowlist protects this application's endpoints. It is not a Supabase sign-up hook: a direct call to Supabase Auth could still create an identity. Such an identity cannot access the application's records, and direct table access remains revoked. If identity creation itself must also be invitation-only, configure a Supabase Before User Created hook or administrator-provisioned accounts separately.
+
+Supabase's default email service only delivers to project team members and is rate-limited. It can support an initial owner-only check if that exact address is a team member. A verified custom SMTP sender is required before adding other testers. Mailtrap **Email Sandbox** captures messages and does not deliver them to Gmail. Check [Supabase SMTP guidance](https://supabase.com/docs/guides/auth/auth-smtp).
+
+Before declaring the preview connected, record: real email code delivery, invited account sign-in, save and reload, JSON export, denial of an uninvited address, isolation between two separately verified test accounts when a second tester is approved, and both payment routes remaining blocked. Automated mock tests support these controls but do not prove the hosted configuration or real email delivery. Do not publish a real-data launch claim from a preview result.
+
 ## 3. Stripe in test mode
 
 Create two active GBP prices:

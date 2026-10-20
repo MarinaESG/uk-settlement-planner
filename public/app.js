@@ -29,9 +29,12 @@ async function account() {
   if (!token) return;
   const w = await (await api("workspace")).json();
   planner.set(w.data);
-  $("mode").textContent = "ACCOUNT RECORDS · SAVE CHANGES";
-  $("accountStatus").textContent =
-    "Signed in. Your saved records have been loaded. Export is available without a subscription.";
+  $("mode").textContent = config.privatePreview
+    ? "PRIVATE PREVIEW · SAVE CHANGES"
+    : "ACCOUNT RECORDS · SAVE CHANGES";
+  $("accountStatus").textContent = config.privatePreview
+    ? "Signed in to the private preview. Saving and exporting are available without payment. Use fictional records for testing; click Save to account after changes."
+    : "Signed in. Your saved records have been loaded. Export is available without a subscription.";
   if (config.commerce) {
     const a = await (await api("account")).json();
     $("accountStatus").textContent +=
@@ -176,6 +179,10 @@ $("delete").onclick = () =>
 document.querySelectorAll("[data-buy]").forEach(
   (b) =>
     (b.onclick = () => {
+      if (config?.privatePreview && b.dataset.buy === "monthly") {
+        $("auth").showModal();
+        return;
+      }
       if (!config?.commerce) {
         $("commerceUnavailable").showModal();
         return;
@@ -248,15 +255,36 @@ try {
   $("routeCount").textContent = String(config.catalogue.length);
   routes();
   $("accountStatus").textContent = config.authReady
-    ? "Sign in to load your account records. The example below is fictional."
+    ? config.privatePreview
+      ? "Private preview for invited testers. Sign in to save and reload fictional test records. Payments are disabled."
+      : "Sign in to load your account records. The example below is fictional."
     : "Pre-launch demo. Accounts and payments are not connected. Do not enter real records in the demo.";
+  $("portal").disabled = !config.commerce;
+  $("download").disabled = !config.commerce;
+  if (config.privatePreview) {
+    $("hostedSummary").textContent = "Free private preview";
+    $("hostedPrice").textContent = "Free private preview";
+    $("plansIntro").textContent =
+      "The private preview is free for invited testers. The £5 download is a planned paid option and cannot be purchased yet. The source code remains public and free to self-host.";
+    document.querySelector('[data-buy="monthly"]').textContent = "Sign in to preview";
+    $("hostedDescription").textContent =
+      "Invited testers can save fictional records to their account and export a backup. Preview access is temporary. Payments are disabled; no subscription is created.";
+    $("billingTerms").textContent =
+      "The private preview is free for invited testers while enabled. It does not start a subscription or authorise future charges. Paid purchases are disabled. Export a backup before preview access ends.";
+    $("dataHandling").textContent =
+      "Preview account email and saved fictional records are stored in Supabase. Each invited account can access only its own workspace. Use fictional records and evidence references only. Export regular backups. No documents are uploaded and no payment details are collected. Full service and privacy information must be completed before public launch.";
+    $("authHint").textContent =
+      "Use the email address invited by the operator. Only invited, verified accounts can access the private preview.";
+  }
   $("operator").textContent =
     "Operator: " +
     config.operator +
     (config.support
       ? " · Support: " + config.support
       : " · Support contact not configured.");
-  $("launchState").textContent = config.sandboxCheckout
+  $("launchState").textContent = config.privatePreview
+    ? "Private preview — invited testers only. Payments are disabled. No payment will be taken."
+    : config.sandboxCheckout
     ? "SANDBOX TEST ONLY — simulated payments. Published terms acceptance has not been tested."
     : config.commerce
     ? "Commerce enabled by operator. Read the published terms before purchasing."
