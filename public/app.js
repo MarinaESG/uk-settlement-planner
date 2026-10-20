@@ -44,6 +44,7 @@ async function account() {
       (a.download ? "available" : "not found") +
       ".";
   }
+  message("");
 }
 function routes() {
   const q = $("routeSearch").value.toLowerCase(),
