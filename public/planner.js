@@ -317,7 +317,7 @@ export function mountPlanner(initial, onChange = () => {}) {
       url = URL.createObjectURL(blob),
       a = el("a");
     a.href = url;
-    a.download = "settlement-planner-backup.json";
+    a.download = "my-settlement-record-backup.json";
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     $("message").textContent = "Backup exported. Keep it somewhere private.";

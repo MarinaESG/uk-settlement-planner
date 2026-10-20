@@ -236,7 +236,7 @@ $("download").onclick = () =>
       url = URL.createObjectURL(blob),
       a = el("a");
     a.href = url;
-    a.download = "Settlement-Planner-UK.html";
+    a.download = "My-Settlement-Record.html";
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     message(

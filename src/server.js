@@ -417,7 +417,7 @@ export function createApp(env = process.env, request = fetch) {
             fail(402, "A completed £5 download purchase is required.");
           res.setHeader(
             "Content-Disposition",
-            'attachment; filename="Settlement-Planner-UK.html"',
+            'attachment; filename="My-Settlement-Record.html"',
           );
           return send(
             200,
