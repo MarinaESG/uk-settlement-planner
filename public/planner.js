@@ -335,7 +335,10 @@ export function mountPlanner(initial, onChange = () => {}) {
       render();
       $("message").textContent = "Backup imported. Review it before saving.";
     } catch (e) {
-      $("message").textContent = e.message;
+      $("message").textContent =
+        e instanceof SyntaxError
+          ? "This file is not a valid JSON backup. Your records have not been changed. Choose a backup exported from My Settlement Record."
+          : e.message;
     } finally {
       e.target.value = "";
     }
