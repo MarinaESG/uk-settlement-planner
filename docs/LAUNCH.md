@@ -10,23 +10,25 @@ The code licence permits commercial operation. It does not establish compliance 
 
 Named release responsibilities to assign:
 
-| Area | Required owner and evidence |
-| --- | --- |
-| Route content | Maintainer plus qualified reviewer; date, official source, coverage decision and approval |
-| Customer service | Operator; published contact and tested cancellation/refund/account-deletion process |
-| Data protection | Operator; processor arrangements, retention, access/deletion handling and backup policy |
-| Billing | Operator; confirmed GBP prices, tax treatment, test receipts and cancellation evidence |
-| Technical release | Maintainer; test report, deployment configuration, recovery and monitoring checks |
+| Area              | Required owner and evidence                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| Route content     | Maintainer plus qualified reviewer; date, official source, coverage decision and approval |
+| Customer service  | Operator; published contact and tested cancellation/refund/account-deletion process       |
+| Data protection   | Operator; processor arrangements, retention, access/deletion handling and backup policy   |
+| Billing           | Operator; confirmed GBP prices, tax treatment, test receipts and cancellation evidence    |
+| Technical release | Maintainer; test report, deployment configuration, recovery and monitoring checks         |
 
 ## 2. Supabase
 
 1. Create your own project and run `supabase/schema.sql` in its SQL editor.
-2. Enable email authentication. Configure the email sign-in template to include the one-time `{{ .Token }}` code, rather than relying solely on a magic link.
+2. Enable email authentication and keep email confirmation enabled. Include the one-time `{{ .Token }}` code in both **Magic link or OTP** and **Confirm sign up** email templates, so new and existing accounts can enter a code in the planner.
 3. Configure production email delivery, authorised site URL, provider rate limits and abuse protection. The in-process IP limiter is only a baseline; behind a proxy, use a platform-level limiter with its trusted client-IP handling.
-4. Place `SUPABASE_URL`, the public/anon key and the **server-only** service-role key in hosting secrets. Never put the service-role key in browser code, a screenshot, a GitHub issue or a committed file.
+4. In Supabase **Settings > API Keys**, obtain a publishable key (`sb_publishable_...`) and a **server-only** secret key (`sb_secret_...`). Set `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` and `SUPABASE_SECRET_KEY` in hosting secrets, or in a local ignored `.env` for testing. Never put the secret key in browser code, a screenshot, a chat, a GitHub issue or a committed file. Legacy `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` remain supported as fallbacks; the new variable names take precedence. See [Supabase API keys](https://supabase.com/docs/guides/getting-started/api-keys).
 5. Test two accounts. Verify that each can only read, save and delete its own workspace, including attempts to pass another user ID in query parameters.
 
-Direct table access for `anon` and `authenticated` is revoked. RLS is enabled without client policies. Only this server’s service-role calls can access the tables, after validating the user with Supabase. Audit any database changes that weaken those restrictions.
+Direct table access for `anon` and `authenticated` is revoked. RLS is enabled without client policies. Only this server’s privileged calls can access the tables, after validating the user with Supabase. Secret keys map to the `service_role` database role and use the `apikey` header; user access tokens continue to use `Authorization: Bearer`. Audit any database changes that weaken those restrictions.
+
+For initial local email tests, set Site URL and `APP_ORIGIN` to `http://localhost:8780`, keep `COMMERCE_ENABLED=false`, and connect a separate test project to Mailtrap **Email Sandbox** SMTP. The sandbox captures authentication messages for inspection and requires no verified sending domain. Read the code from its inbox; this does not test delivery to a customer's real mailbox. Use a verified production sender before enabling real customer sign-ups. Never use the static `file://` preview for connected account tests; run the Node server.
 
 Sessions are stored in browser session storage. There is no automatic refresh: an expired session requires a new email code. The app never sends workspace records to Stripe. Deleting a workspace does not delete the Supabase identity or legally required payment records; the operator must provide a separate full-account request process.
 
@@ -34,14 +36,16 @@ Sessions are stored in browser session storage. There is no automatic refresh: a
 
 Create two active GBP prices:
 
-| Environment variable | Amount | Type |
-| --- | --- | --- |
-| `STRIPE_DOWNLOAD_PRICE_ID` | 500 pence | One-time, per-unit |
-| `STRIPE_MONTHLY_PRICE_ID` | 100 pence | Recurring, every one month, per-unit |
+| Environment variable       | Amount    | Type                                 |
+| -------------------------- | --------- | ------------------------------------ |
+| `STRIPE_DOWNLOAD_PRICE_ID` | 500 pence | One-time, per-unit                   |
+| `STRIPE_MONTHLY_PRICE_ID`  | 100 pence | Recurring, every one month, per-unit |
 
 Configure inclusive tax treatment where required so the displayed total agrees with the advertised price. The current app does not add Stripe Tax or discounts. Do not enable extra surcharges without changing the product and entitlement checks.
 
 Set a published Terms of Service URL in Stripe Checkout settings, because Checkout requires acceptance. Configure the customer portal to permit cancellation at the end of the current billing period and payment-method updates; disable plan switching and quantity changes for this initial release. Configure receipts and support information.
+
+For local sandbox testing before business onboarding, `STRIPE_SANDBOX_CHECKOUT=true` explicitly enables a simulated checkout without Stripe's Terms of Service checkbox. It requires a `sk_test_` key, a localhost/127.0.0.1 HTTP origin, a loopback bind address and a non-production environment; invalid combinations stop the server. The planner shows a test acknowledgement and Stripe shows a simulation notice. Test prices and returned sessions must have `livemode=false`. Default checkout continues to require the published terms. This option tests payment, return and entitlement behaviour only: it does not validate terms acceptance, business verification or production readiness. Use fictional account details, Stripe test cards and a separate test Supabase project. Remove or set this flag to false before deployment.
 
 Set the Stripe secret key and price IDs as server secrets. `STRIPE_WEBHOOK_SECRET` is optional unless registering `/api/webhook`. That endpoint verifies the raw signature but performs **no entitlement mutation**. Every protected access checks canonical Stripe records, so webhook duplicates or out-of-order delivery cannot create access.
 

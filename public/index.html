@@ -249,6 +249,20 @@
         <p id="authMessage" role="status"></p>
       </form>
     </dialog>
+    <dialog
+      id="commerceUnavailable"
+      aria-labelledby="commerceUnavailableTitle"
+      aria-describedby="commerceUnavailableText"
+    >
+      <form method="dialog">
+        <h2 id="commerceUnavailableTitle">Purchases are not available yet</h2>
+        <p id="commerceUnavailableText">
+          Payments are not activated in this pre-launch version. No charge has
+          been made. You can continue exploring the fictional demo.
+        </p>
+        <button autofocus>Close</button>
+      </form>
+    </dialog>
     <dialog id="purchase">
       <form method="dialog">
         <h2 id="purchaseTitle">Review your purchase</h2>
@@ -260,14 +274,15 @@
           software, not an immigration assessment.
         </p>
         <label class="checkbox"
-          ><input id="acceptTerms" type="checkbox" /> I accept the purchase
-          terms and recurring billing where selected.</label
+          ><input id="acceptTerms" type="checkbox" /><span id="acceptTermsText"> I accept the purchase
+          terms and recurring billing where selected.</span></label
         >
         <div class="actions">
           <button type="button" id="checkout">
             Continue to secure checkout</button
           ><button>Cancel</button>
         </div>
+        <p id="checkoutMessage" role="status" aria-live="polite"></p>
       </form>
     </dialog>
   </body>

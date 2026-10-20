@@ -14,11 +14,26 @@ export function createApp(env = process.env, request = fetch) {
   const origin = env.APP_ORIGIN || "http://localhost:8780";
   if (env.NODE_ENV === "production" && !origin.startsWith("https://"))
     throw Error("Production requires an HTTPS APP_ORIGIN.");
-  const authReady = !!(
-    env.SUPABASE_URL &&
-    env.SUPABASE_ANON_KEY &&
-    env.SUPABASE_SERVICE_ROLE_KEY
-  );
+  const sandboxCheckout = env.STRIPE_SANDBOX_CHECKOUT === "true";
+  if (
+    sandboxCheckout &&
+    (env.NODE_ENV === "production" ||
+      !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
+      !["127.0.0.1", "localhost", "::1"].includes(env.HOST || "127.0.0.1") ||
+      !env.STRIPE_SECRET_KEY?.startsWith("sk_test_"))
+  )
+    throw Error("Sandbox checkout requires a test key and a non-production, loopback-only server.");
+  const publishableKey = env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY;
+  const secretKey = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
+  const authReady = !!(env.SUPABASE_URL && publishableKey && secretKey);
+  // Opaque secret keys use apikey; only legacy JWT keys belong in Bearer.
+  const databaseHeaders = {
+    apikey: secretKey,
+    ...(secretKey?.startsWith("sb_secret_")
+      ? {}
+      : { Authorization: "Bearer " + secretKey }),
+    "Content-Type": "application/json",
+  };
   const commerce =
     authReady &&
     env.COMMERCE_ENABLED === "true" &&
@@ -52,9 +67,7 @@ export function createApp(env = process.env, request = fetch) {
     return remote(env.SUPABASE_URL + "/rest/v1/" + path, {
       method,
       headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: "Bearer " + env.SUPABASE_SERVICE_ROLE_KEY,
-        "Content-Type": "application/json",
+        ...databaseHeaders,
         Prefer: "return=representation",
       },
       body: data === undefined ? undefined : JSON.stringify(data),
@@ -79,7 +92,7 @@ export function createApp(env = process.env, request = fetch) {
     const h = req.headers.authorization || "";
     if (!/^Bearer [A-Za-z0-9._-]+$/.test(h)) fail(401, "Please sign in.");
     const r = await request(env.SUPABASE_URL + "/auth/v1/user", {
-      headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: h },
+      headers: { apikey: publishableKey, Authorization: h },
       signal: AbortSignal.timeout(15000),
     });
     if (!r.ok) fail(401, "Your session has expired. Sign in again.");
@@ -102,9 +115,7 @@ export function createApp(env = process.env, request = fetch) {
     await remote(env.SUPABASE_URL + "/rest/v1/customers?on_conflict=user_id", {
       method: "POST",
       headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: "Bearer " + env.SUPABASE_SERVICE_ROLE_KEY,
-        "Content-Type": "application/json",
+        ...databaseHeaders,
         Prefer: "resolution=ignore-duplicates",
       },
       body: JSON.stringify({ user_id: u.id, stripe_customer_id: c.id }),
@@ -212,6 +223,7 @@ export function createApp(env = process.env, request = fetch) {
         return send(200, {
           authReady,
           commerce,
+          sandboxCheckout,
           operator: env.OPERATOR_NAME || "Operator not configured",
           support: env.SUPPORT_EMAIL || "",
           catalogue,
@@ -248,7 +260,7 @@ export function createApp(env = process.env, request = fetch) {
           {
             method: "POST",
             headers: {
-              apikey: env.SUPABASE_ANON_KEY,
+              apikey: publishableKey,
               "Content-Type": "application/json",
             },
             body: JSON.stringify(
@@ -290,9 +302,7 @@ export function createApp(env = process.env, request = fetch) {
             {
               method: "POST",
               headers: {
-                apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-                Authorization: "Bearer " + env.SUPABASE_SERVICE_ROLE_KEY,
-                "Content-Type": "application/json",
+                ...databaseHeaders,
                 Prefer: "resolution=merge-duplicates",
               },
               body: JSON.stringify({
@@ -328,11 +338,10 @@ export function createApp(env = process.env, request = fetch) {
             d.product === "monthly"
               ? env.STRIPE_MONTHLY_PRICE_ID
               : env.STRIPE_DOWNLOAD_PRICE_ID;
+          const configuredPrice = await stripe("prices/" + encodeURIComponent(price));
           if (
-            !priceMatches(
-              await stripe("prices/" + encodeURIComponent(price)),
-              d.product,
-            )
+            !priceMatches(configuredPrice, d.product) ||
+            (sandboxCheckout && configuredPrice.livemode !== false)
           )
             fail(
               503,
@@ -356,7 +365,10 @@ export function createApp(env = process.env, request = fetch) {
               s.status === "open" &&
               s.client_reference_id === u.id &&
               s.metadata?.product === d.product &&
-              s.metadata?.price === price,
+              s.metadata?.price === price &&
+              (sandboxCheckout
+                ? s.livemode === false && s.metadata?.sandbox_checkout === "true"
+                : s.metadata?.sandbox_checkout !== "true"),
           );
           if (open) return send(200, { url: open.url });
           const session = await stripe(
@@ -370,18 +382,23 @@ export function createApp(env = process.env, request = fetch) {
               "line_items[0][quantity]": "1",
               "metadata[product]": d.product,
               "metadata[price]": price,
-              "payment_method_types[0]": "card",
+              "metadata[sandbox_checkout]": String(sandboxCheckout),
               success_url: origin + "/?checkout=returned",
               cancel_url: origin + "/?checkout=cancelled",
-              "consent_collection[terms_of_service]": "required",
+              ...(sandboxCheckout
+                ? { "custom_text[submit][message]": "SANDBOX TEST ONLY. Use a Stripe test card. No real payment or purchase contract is created." }
+                : { "consent_collection[terms_of_service]": "required" }),
             },
-            "checkout-" +
+            "checkout-v2-" +
               u.id +
               "-" +
               d.product +
               "-" +
+              (sandboxCheckout ? "sandbox-" : "standard-") +
               Math.floor(Date.now() / 1800000),
           );
+          if (sandboxCheckout && session.livemode !== false)
+            fail(502, "Stripe did not return a sandbox checkout session.");
           return send(200, { url: session.url });
         }
         if (path === "/api/portal" && req.method === "POST") {

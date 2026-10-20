@@ -176,8 +176,10 @@ $("delete").onclick = () =>
 document.querySelectorAll("[data-buy]").forEach(
   (b) =>
     (b.onclick = () => {
-      if (!config?.commerce)
-        return message("Payments are not activated. No charge has been made.");
+      if (!config?.commerce) {
+        $("commerceUnavailable").showModal();
+        return;
+      }
       if (!token) {
         $("auth").showModal();
         return;
@@ -191,20 +193,37 @@ document.querySelectorAll("[data-buy]").forEach(
         product === "monthly"
           ? "Renews monthly until cancelled. Export remains available after cancellation. The offline download is a separate purchase."
           : "A standalone HTML planner to keep on your computer. No hosted subscription or guaranteed future updates included.";
+      if (config.sandboxCheckout) {
+        $("purchaseTitle").textContent = "SANDBOX TEST · " + $("purchaseTitle").textContent;
+        $("purchaseText").textContent += " This is a simulated purchase. Use a Stripe test card; no real money will be taken and no purchase contract is created.";
+      }
+      $("acceptTermsText").textContent = config.sandboxCheckout
+        ? " I understand this is a sandbox simulation using fictional details and a Stripe test card."
+        : " I accept the purchase terms and recurring billing where selected.";
       $("acceptTerms").checked = false;
+      $("checkoutMessage").textContent = "";
       $("purchase").showModal();
     }),
 );
 $("termsLink").onclick = () => $("purchase").close();
-$("checkout").onclick = () =>
-  action(async () => {
+$("checkout").onclick = async () => {
+  $("checkout").disabled = true;
+  $("checkoutMessage").textContent = "Opening secure checkout…";
+  try {
     if (!$("acceptTerms").checked)
-      throw Error("Please review and accept the purchase terms.");
+      throw Error(config.sandboxCheckout
+        ? "Please confirm that this is a sandbox simulation."
+        : "Please review and accept the purchase terms.");
     const d = await (
       await api("checkout", "POST", { product, acceptTerms: true })
     ).json();
     location.assign(d.url);
-  });
+  } catch (e) {
+    $("checkoutMessage").textContent = e.message;
+  } finally {
+    $("checkout").disabled = false;
+  }
+};
 $("portal").onclick = () =>
   action(async () => {
     const d = await (await api("portal", "POST", {})).json();
@@ -237,7 +256,9 @@ try {
     (config.support
       ? " · Support: " + config.support
       : " · Support contact not configured.");
-  $("launchState").textContent = config.commerce
+  $("launchState").textContent = config.sandboxCheckout
+    ? "SANDBOX TEST ONLY — simulated payments. Published terms acceptance has not been tested."
+    : config.commerce
     ? "Commerce enabled by operator. Read the published terms before purchasing."
     : "Pre-launch software — purchases disabled. No payment will be taken.";
   if (token) await account();
