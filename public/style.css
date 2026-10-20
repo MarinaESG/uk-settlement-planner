@@ -363,6 +363,11 @@ input[type="checkbox"] {
   border-left: 3px solid var(--green);
   font-size: 13px;
 }
+.save-warning {
+  background: #fff4df;
+  border-color: #824600;
+  color: #633500;
+}
 .tabs {
   display: flex;
   border-bottom: 1px solid var(--line);

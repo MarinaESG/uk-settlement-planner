@@ -34,6 +34,9 @@ async function api(path, method = "GET", data, headers = {}) {
 function message(e) {
   $("message").textContent = e.message || String(e);
 }
+function clearSaveFailure() {
+  $("saveFailure").hidden = true;
+}
 function setConflict(value) {
   conflict = value;
   $("saveConflict").hidden = !value;
@@ -98,6 +101,8 @@ async function account() {
       "Saving protection is not ready. Keep this page open and export your changes.",
     );
   planner.set(w.data);
+  // A deliberately loaded workspace replaces the draft the warning belonged to.
+  clearSaveFailure();
   revision = w.revision;
   setConflict(false);
   $("mode").textContent = config.privatePreview
@@ -211,10 +216,24 @@ $("save").onclick = () =>
     if (conflict) return;
     const data = structuredClone(validateWorkspace(planner.get()));
     const started = changes;
-    const saved = await (
-      await api("workspace", "POST", data, precondition())
-    ).json();
+    const headers = precondition();
+    let saved;
+    try {
+      saved = await (await api("workspace", "POST", data, headers)).json();
+      if (
+        saved.saved !== true ||
+        !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(saved.revision)
+      )
+        throw Error("The save acknowledgement is incomplete.");
+    } catch (e) {
+      if (e.status === 409 || e.status === 428) throw e;
+      // Separate from routine edit/export messages; retain the draft and revision.
+      $("saveFailure").hidden = false;
+      message(e.status && e.status < 500 ? e : "");
+      return;
+    }
     revision = saved.revision;
+    clearSaveFailure();
     $("message").textContent =
       started === changes
         ? "Workspace saved to your account."
@@ -242,6 +261,7 @@ $("loadDemo").onclick = () => {
   ) {
     changes++;
     planner.set(fictional());
+    clearSaveFailure();
     $("mode").textContent = "FICTIONAL DEMO · NOT SAVED";
     message("Fictional demo loaded.");
   }
@@ -257,6 +277,7 @@ $("signOut").onclick = () => {
   setConflict(false);
   sessionStorage.removeItem("sp-session");
   planner.set(fictional());
+  clearSaveFailure();
   $("mode").textContent = "FICTIONAL DEMO · NOT SAVED";
   $("accountStatus").textContent =
     "Signed out. Account records are no longer on screen.";
@@ -276,6 +297,7 @@ $("delete").onclick = () =>
     revision = null;
     setConflict(false);
     planner.set(emptyWorkspace());
+    clearSaveFailure();
     message(
       "Saved workspace deleted. Billing and account email remain; contact support for full account deletion.",
     );
