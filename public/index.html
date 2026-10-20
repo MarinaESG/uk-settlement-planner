@@ -129,10 +129,11 @@
           <span id="mode" class="tag">FICTIONAL DEMO · NOT SAVED</span>
         </div>
         <p id="accountStatus" class="notice">Loading account availability…</p>
+        <p class="notice" aria-live="polite"><strong id="storageStatus">Fictional demo — held on this page only</strong><br><small id="lastSaved">No cloud save time available in this tab.</small></p>
         <div class="toolbar">
           <button id="loadDemo">Reset fictional demo</button
           ><button id="save">Save to account</button
-          ><button id="export">Export JSON backup</button
+          ><button id="resumeSignIn" hidden>Sign in again to save</button><button id="export">Export JSON backup</button
           ><label class="file-button"
             >Import backup<input
               id="import"
@@ -260,7 +261,7 @@
         /></label>
         <div class="actions">
           <button type="button" id="sendCode">Send code</button
-          ><button type="submit">Verify code</button>
+          ><button type="submit" id="verifyCode">Verify code</button>
         </div>
         <p id="authMessage" role="status"></p>
       </form>

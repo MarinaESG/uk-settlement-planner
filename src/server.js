@@ -352,6 +352,7 @@ export function createApp(env = process.env, request = fetch) {
               "Saving protection is not ready. Your records have not been changed. Please contact support.",
             );
           return send(200, {
+            ownerId: u.id,
             data: rows[0]?.data || emptyWorkspace(),
             updated: rows[0]?.updated_at || null,
             revision: rows[0]?.revision || null,

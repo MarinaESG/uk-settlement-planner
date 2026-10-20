@@ -6,9 +6,18 @@ let config,
   revision,
   conflict = false,
   saving = false,
-  changes = 0;
+  changes = 0,
+  dirty = false,
+  authenticated = false,
+  expired = false,
+  ownerId,
+  savedAt = null,
+  authAttempt = 0,
+  verifying = false;
 const planner = mountPlanner(fictional(), () => {
   changes++;
+  dirty = true;
+  updateStatus();
   $("message").textContent = conflict
     ? "Changes on screen are unsaved. Export a backup before loading the latest saved records."
     : "Changes on screen are unsaved. Export a backup or save to your account.";
@@ -27,6 +36,10 @@ async function api(path, method = "GET", data, headers = {}) {
     const d = await r.json();
     const error = Error(d.error || "Request failed.");
     error.status = r.status;
+    if (r.status === 401 && token) {
+      expired = true;
+      updateStatus();
+    }
     throw error;
   }
   return r;
@@ -34,13 +47,47 @@ async function api(path, method = "GET", data, headers = {}) {
 function message(e) {
   $("message").textContent = e.message || String(e);
 }
+function updateStatus() {
+  $("storageStatus").textContent = expired
+    ? "Sign-in expired — edits remain on this page"
+    : saving
+      ? "Updating account records…"
+      : dirty
+        ? "Unsaved changes — held on this page only"
+        : authenticated
+          ? "Loaded records match the last confirmed cloud version"
+          : "Fictional demo — held on this page only";
+  const date = savedAt && new Date(savedAt);
+  $("lastSaved").textContent =
+    date && !Number.isNaN(date.getTime())
+      ? "Last confirmed cloud save: " + date.toLocaleString("en-GB")
+      : "No cloud save time available in this tab.";
+  $("signIn").textContent =
+    authenticated && !expired
+      ? "My workspace"
+      : expired
+        ? "Sign in again"
+        : "Sign in";
+  $("signOut").hidden = !authenticated && !expired;
+  $("delete").hidden = !authenticated || expired;
+  $("save").hidden = expired;
+  $("save").disabled = saving || conflict || !authenticated;
+  $("resumeSignIn").hidden = !expired;
+  $("resumeSignIn").disabled = saving;
+}
+if (typeof window !== "undefined")
+  window.addEventListener("beforeunload", (e) => {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
 function clearSaveFailure() {
   $("saveFailure").hidden = true;
 }
 function setConflict(value) {
   conflict = value;
   $("saveConflict").hidden = !value;
-  $("save").disabled = saving || conflict;
+  $("save").disabled = saving || conflict || !authenticated;
   $("delete").disabled = saving || conflict;
 }
 function precondition() {
@@ -57,6 +104,7 @@ function precondition() {
 async function workspaceAction(fn) {
   if (saving) return;
   saving = true;
+  updateStatus();
   for (const id of [
     "save",
     "delete",
@@ -82,29 +130,48 @@ async function workspaceAction(fn) {
     for (const id of ["loadLatest", "loadDemo", "signIn", "signOut"])
       $(id).disabled = false;
     setConflict(conflict);
+    updateStatus();
   }
 }
-async function account() {
+async function account({ recoverOwner, started = changes } = {}) {
   if (!token) return;
-  const started = changes;
+  // Re-authentication checks ownership/revision without replacing tab memory.
+  // This also protects edits made while the code or cloud read is in flight.
+  const keepDraft = Boolean(recoverOwner);
   const session = token;
   const w = await (await api("workspace")).json();
   if (token !== session) return false;
-  if (started !== changes) {
+  if (!keepDraft && started !== changes) {
     setConflict(true);
     throw Error(
       "You made more changes while records were loading. They are still on this page. Export a backup before trying again.",
     );
   }
-  if (!Object.hasOwn(w, "revision"))
+  if (
+    !Object.hasOwn(w, "revision") ||
+    typeof w.ownerId !== "string" ||
+    !w.ownerId
+  )
     throw Error(
       "Saving protection is not ready. Keep this page open and export your changes.",
     );
-  planner.set(w.data);
-  // A deliberately loaded workspace replaces the draft the warning belonged to.
-  clearSaveFailure();
-  revision = w.revision;
-  setConflict(false);
+  if (keepDraft && w.ownerId !== recoverOwner)
+    throw Error(
+      "Sign back in to the account that owns this draft. Your edits are still on this page; export a backup to keep them.",
+    );
+  const newerCloud = keepDraft && w.revision !== revision;
+  if (!keepDraft) {
+    planner.set(w.data);
+    dirty = false;
+    clearSaveFailure();
+  }
+  if (!newerCloud) revision = w.revision;
+  ownerId = w.ownerId;
+  authenticated = true;
+  expired = false;
+  savedAt = w.updated;
+  setConflict(newerCloud);
+  updateStatus();
   $("mode").textContent = config.privatePreview
     ? "PRIVATE PREVIEW · SAVE CHANGES"
     : "ACCOUNT RECORDS · SAVE CHANGES";
@@ -120,7 +187,15 @@ async function account() {
       (a.download ? "available" : "not found") +
       ".";
   }
-  message("");
+  message(
+    keepDraft
+      ? newerCloud
+        ? "Signed in again. Your draft is preserved, but the cloud record has changed. Export your draft before loading the latest records."
+        : dirty
+          ? "Signed in again. Your unsaved draft is preserved. Review it, then choose Save to account."
+          : "Signed in again. Your on-screen records are preserved. Choose Save to account to confirm a save."
+      : "",
+  );
   return true;
 }
 function routes() {
@@ -171,7 +246,12 @@ async function action(fn) {
   }
 }
 $("routeSearch").oninput = () => config && routes();
+$("resumeSignIn").onclick = () => $("auth").showModal();
 $("signIn").onclick = () => {
+  if (authenticated && !expired) {
+    location.hash = "workspace";
+    return;
+  }
   if (!config?.authReady)
     return message("Accounts are not connected yet. Use the fictional demo.");
   $("auth").showModal();
@@ -187,10 +267,19 @@ $("sendCode").onclick = async () => {
 };
 $("authForm").onsubmit = async (e) => {
   e.preventDefault();
+  if (verifying || saving) return;
+  verifying = true;
+  const attempt = ++authAttempt;
+  const oldToken = token;
+  const recoverOwner = ownerId;
+  const started = changes;
+  $("verifyCode").disabled = true;
   try {
     if (
+      dirty &&
+      !recoverOwner &&
       !confirm(
-        "Sign in and replace the on-screen demo with your account records? Export any changes first.",
+        "Load account records and replace the on-screen draft? Export a JSON backup first to keep your changes.",
       )
     )
       return;
@@ -200,14 +289,23 @@ $("authForm").onsubmit = async (e) => {
         token: $("code").value,
       })
     ).json();
+    if (attempt !== authAttempt) return;
     if (!a.token) throw Error("No session returned.");
     token = a.token;
-    revision = undefined;
+    if (!(await account({ recoverOwner, started })) || attempt !== authAttempt)
+      return;
     sessionStorage.setItem("sp-session", token);
-    await account();
+    $("code").value = "";
+    $("authMessage").textContent = "";
     $("auth").close();
   } catch (e) {
+    if (attempt !== authAttempt) return;
+    token = oldToken;
+    updateStatus();
     $("authMessage").textContent = e.message;
+  } finally {
+    verifying = false;
+    $("verifyCode").disabled = false;
   }
 };
 $("save").onclick = () =>
@@ -233,6 +331,9 @@ $("save").onclick = () =>
       return;
     }
     revision = saved.revision;
+    savedAt = saved.updated;
+    dirty = started !== changes;
+    expired = false;
     clearSaveFailure();
     $("message").textContent =
       started === changes
@@ -260,7 +361,9 @@ $("loadDemo").onclick = () => {
     )
   ) {
     changes++;
+    dirty = true;
     planner.set(fictional());
+    updateStatus();
     clearSaveFailure();
     $("mode").textContent = "FICTIONAL DEMO · NOT SAVED";
     message("Fictional demo loaded.");
@@ -271,7 +374,20 @@ $("demoLink").onclick = () => {
     "The initial trip and permission are fictional. Explore the three tabs; nothing is saved automatically.";
 };
 $("signOut").onclick = () => {
+  if (
+    dirty &&
+    !confirm(
+      "Sign out and discard unsaved edits on this page? Cancel and export a JSON backup first to keep them.",
+    )
+  )
+    return;
+  authAttempt++;
   changes++;
+  dirty = false;
+  authenticated = false;
+  expired = false;
+  ownerId = undefined;
+  savedAt = null;
   token = "";
   revision = undefined;
   setConflict(false);
@@ -282,6 +398,7 @@ $("signOut").onclick = () => {
   $("accountStatus").textContent =
     "Signed out. Account records are no longer on screen.";
   message("Signed out of this planner tab.");
+  updateStatus();
 };
 $("delete").onclick = () =>
   workspaceAction(async () => {
@@ -297,6 +414,8 @@ $("delete").onclick = () =>
     revision = null;
     setConflict(false);
     planner.set(emptyWorkspace());
+    dirty = false;
+    savedAt = null;
     clearSaveFailure();
     message(
       "Saved workspace deleted. Billing and account email remain; contact support for full account deletion.",
@@ -415,6 +534,7 @@ try {
     : config.commerce
     ? "Commerce enabled by operator. Read the published terms before purchasing."
     : "Pre-launch software — purchases disabled. No payment will be taken.";
+  updateStatus();
   if (token) await account();
   if (new URLSearchParams(location.search).get("checkout") === "returned")
     message(

@@ -24,7 +24,7 @@ const deferred = () => {
 
 // Execute the actual connected-app controller with a small DOM/planner adapter.
 // Browser acceptance also checks the real form, export download and warning.
-async function screen() {
+async function screen(configOverrides = {}, initialCloud) {
   const nodes = new Map();
   const $ = (id) => {
     if (!nodes.has(id))
@@ -45,8 +45,22 @@ async function screen() {
       });
     return nodes.get(id);
   };
+  const buys = ["monthly", "download"].map((kind) => {
+    const node = $(kind);
+    node.dataset = { buy: kind };
+    return node;
+  });
   const state = {
-    cloud: { data: workspace("baseline"), revision: oldRevision },
+    purchaseRequests: 0,
+    cloud: initialCloud || {
+      data: workspace("baseline"),
+      revision: oldRevision,
+      ownerId: "owner-a",
+      updated: "2026-10-20T12:00:00Z",
+    },
+    authHook: null,
+    authResponse: null,
+    unload: null,
     reads: 0,
     writes: 0,
     confirm: false,
@@ -65,7 +79,13 @@ async function screen() {
         commerce: false,
         sandboxCheckout: false,
         operator: "Fictional test",
+        ...configOverrides,
       });
+    if (url === "/api/auth/otp") {
+      if (state.authHook) await state.authHook();
+      if (state.authResponse) return state.authResponse();
+      return Response.json({ token: "fictional-session" });
+    }
     assert.equal(url, "/api/workspace");
     assert.equal(options.headers.Authorization, "Bearer fictional-session");
     if (state.hook) await state.hook(options);
@@ -80,13 +100,20 @@ async function screen() {
         { status: 409 },
       );
     state.writes++;
-    state.cloud = { data: JSON.parse(options.body), revision: newRevision };
+    state.cloud = {
+      ...state.cloud,
+      data: JSON.parse(options.body),
+      revision: newRevision,
+    };
     if (state.acknowledge) return state.acknowledge();
     return Response.json({ saved: true, revision: newRevision });
   };
   await runInNewContext(`(async()=>{${source}\n})()`, {
     $,
-    document: { querySelectorAll: () => [], querySelector: () => $("monthly") },
+    document: {
+      querySelectorAll: (selector) => (selector === "[data-buy]" ? buys : []),
+      querySelector: () => $("monthly"),
+    },
     mountPlanner: (initial, onChange) => {
       current = initial;
       changed = onChange;
@@ -105,6 +132,11 @@ async function screen() {
     fetch,
     URL,
     URLSearchParams,
+    window: {
+      addEventListener: (name, fn) => {
+        if (name === "beforeunload") state.unload = fn;
+      },
+    },
     location: {
       search: "",
       hash: "",
@@ -131,13 +163,14 @@ async function screen() {
       changed(current);
     },
     click: (id) => $(id).onclick(),
+    signIn: () => $("authForm").onsubmit({ preventDefault() {} }),
   };
 }
 
 test("stale-save warning preserves the draft and blocks save/delete while further editing remains possible", async () => {
   const ui = await screen();
   ui.edit("unsaved B");
-  ui.state.cloud = { data: workspace("newer A"), revision: newRevision };
+  ui.state.cloud = { ...ui.state.cloud, data: workspace("newer A"), revision: newRevision };
   await ui.click("save");
   assert.equal(ui.current().checks[0].note, "unsaved B");
   assert.equal(ui.state.cloud.data.checks[0].note, "newer A");
@@ -155,7 +188,7 @@ test("stale-save warning preserves the draft and blocks save/delete while furthe
 test("cancel loading keeps the draft; explicit confirmation loads the latest version and permits a deliberate save", async () => {
   const ui = await screen();
   ui.edit("unsaved B");
-  ui.state.cloud = { data: workspace("newer A"), revision: newRevision };
+  ui.state.cloud = { ...ui.state.cloud, data: workspace("newer A"), revision: newRevision };
   await ui.click("save");
   const before = ui.current(),
     reads = ui.state.reads;
@@ -308,6 +341,10 @@ test("signing out does not carry a failed-save warning into the fictional demo",
   await ui.click("save");
   assert.equal(ui.$("saveFailure").hidden, false);
   ui.click("signOut");
+  assert.equal(ui.$("saveFailure").hidden, false);
+  assert.equal(ui.current().checks[0].note, "unsaved draft");
+  ui.state.confirm = true;
+  ui.click("signOut");
   assert.equal(ui.$("saveFailure").hidden, true);
   assert.equal(ui.current().checks[0].note, "fictional demo");
   assert.match(ui.$("message").textContent, /Signed out/);
@@ -353,4 +390,223 @@ test("signing out clears conflict state and a late load response cannot restore 
   assert.match(ui.$("accountStatus").textContent, /Signed out/);
   assert.match(ui.$("message").textContent, /Signed out/);
   assert.equal(ui.$("saveConflict").hidden, true);
+});
+
+test("expired sign-in recovery preserves the same owner's draft until a deliberate successful save", async () => {
+  const ui = await screen();
+  const original = structuredClone(ui.state.cloud);
+  ui.edit("draft after expiry");
+  const draft = ui.current();
+  ui.state.response = () =>
+    Response.json({ error: "Sign in again." }, { status: 401 });
+  await ui.click("save");
+  assert.equal(ui.$("resumeSignIn").hidden, false);
+  assert.equal(ui.$("save").hidden, true);
+  assert.equal(ui.$("saveFailure").hidden, false);
+  ui.state.response = null;
+  await ui.signIn();
+  assert.deepEqual(ui.current(), draft);
+  assert.deepEqual(ui.state.cloud, original);
+  assert.equal(ui.state.writes, 0);
+  assert.equal(ui.state.confirmations.length, 0);
+  assert.equal(ui.$("saveFailure").hidden, false);
+  assert.equal(ui.$("resumeSignIn").hidden, true);
+  assert.match(ui.$("message").textContent, /unsaved draft is preserved/);
+  await ui.click("save");
+  assert.deepEqual(ui.state.cloud.data, draft);
+  assert.equal(ui.$("saveFailure").hidden, true);
+});
+
+test("recovery preserves edits entered while the sign-in code is being verified", async () => {
+  const ui = await screen();
+  const original = structuredClone(ui.state.cloud);
+  const waiting = deferred(), started = deferred();
+  ui.state.authHook = async () => {
+    started.resolve();
+    await waiting.promise;
+  };
+  const pending = ui.signIn();
+  await started.promise;
+  ui.edit("typed while verifying");
+  const draft = ui.current();
+  waiting.resolve();
+  await pending;
+  assert.deepEqual(ui.current(), draft);
+  assert.deepEqual(ui.state.cloud, original);
+  assert.equal(ui.state.confirmations.length, 0);
+  assert.equal(ui.$("authMessage").textContent, "");
+  await ui.click("save");
+  assert.deepEqual(ui.state.cloud.data, draft);
+});
+
+test("recovery preserves further edits made while the cloud revision is being checked", async () => {
+  const ui = await screen();
+  ui.edit("draft before sign-in");
+  const original = structuredClone(ui.state.cloud);
+  const waiting = deferred(), started = deferred();
+  ui.state.hook = async () => {
+    started.resolve();
+    await waiting.promise;
+  };
+  const pending = ui.signIn();
+  await started.promise;
+  ui.edit("latest edit while recovering");
+  const draft = ui.current();
+  waiting.resolve();
+  await pending;
+  assert.deepEqual(ui.current(), draft);
+  assert.deepEqual(ui.state.cloud, original);
+  assert.equal(ui.$("authMessage").textContent, "");
+  assert.equal(ui.$("saveConflict").hidden, true);
+  ui.state.hook = null;
+  await ui.click("save");
+  assert.deepEqual(ui.state.cloud.data, draft);
+});
+
+test("sign-in alone cannot clear a failed-save warning even when the draft has no new edits", async () => {
+  const ui = await screen();
+  const original = structuredClone(ui.state.cloud);
+  ui.state.response = () =>
+    Response.json({ error: "Your session has expired. Sign in again." }, { status: 401 });
+  await ui.click("save");
+  assert.equal(ui.$("saveFailure").hidden, false);
+  ui.state.response = null;
+  await ui.signIn();
+  assert.equal(ui.$("saveFailure").hidden, false);
+  assert.deepEqual(ui.state.cloud, original);
+  assert.deepEqual(ui.current(), original.data);
+  assert.equal(ui.state.writes, 0);
+  await ui.click("save");
+  assert.equal(ui.$("saveFailure").hidden, true);
+  assert.equal(ui.state.writes, 1);
+});
+
+test("failed verification, a failed recovery read and another failed save all retain the draft and warning", async () => {
+  const ui = await screen();
+  const original = structuredClone(ui.state.cloud);
+  ui.edit("complete draft to recover");
+  const draft = ui.current();
+  ui.state.response = () =>
+    Response.json({ error: "Your session has expired. Sign in again." }, { status: 401 });
+  await ui.click("save");
+  ui.state.authResponse = () =>
+    Response.json({ error: "Code has expired. Request a new code." }, { status: 400 });
+  await ui.signIn();
+  assert.match(ui.$("authMessage").textContent, /Request a new code/);
+  assert.equal(ui.$("saveFailure").hidden, false);
+  assert.deepEqual(ui.current(), draft);
+  assert.deepEqual(ui.state.cloud, original);
+
+  ui.state.authResponse = null;
+  ui.state.response = () =>
+    Response.json({ error: "Account service unavailable." }, { status: 502 });
+  await ui.signIn();
+  assert.match(ui.$("authMessage").textContent, /unavailable/);
+  assert.equal(ui.$("saveFailure").hidden, false);
+  assert.deepEqual(ui.current(), draft);
+  assert.deepEqual(ui.state.cloud, original);
+
+  ui.state.response = null;
+  await ui.signIn();
+  assert.equal(ui.$("authMessage").textContent, "");
+  assert.equal(ui.$("saveFailure").hidden, false);
+  ui.state.response = () => {
+    throw TypeError("Connection lost");
+  };
+  await ui.click("save");
+  assert.equal(ui.$("saveFailure").hidden, false);
+  assert.deepEqual(ui.current(), draft);
+  assert.deepEqual(ui.state.cloud, original);
+  assert.equal(ui.state.writes, 0);
+  ui.state.response = null;
+  await ui.click("save");
+  assert.equal(ui.$("saveFailure").hidden, true);
+  assert.deepEqual(ui.state.cloud.data, draft);
+});
+
+test("initial sign-in does not replace demo edits made after replacement was confirmed", async () => {
+  const ui = await screen();
+  ui.click("signOut");
+  ui.edit("demo before verification");
+  ui.state.confirm = true;
+  const waiting = deferred(), started = deferred();
+  ui.state.authHook = async () => {
+    started.resolve();
+    await waiting.promise;
+  };
+  const pending = ui.signIn();
+  await started.promise;
+  ui.edit("demo edited after confirmation");
+  const draft = ui.current();
+  waiting.resolve();
+  await pending;
+  assert.deepEqual(ui.current(), draft);
+  assert.match(ui.$("authMessage").textContent, /more changes while records were loading/);
+  assert.equal(ui.state.writes, 0);
+  assert.equal(ui.$("save").disabled, true);
+});
+
+test("re-authentication detects newer cloud records without silently replacing the draft", async () => {
+  const ui = await screen();
+  ui.edit("my draft");
+  ui.state.cloud = {
+    ...ui.state.cloud,
+    data: workspace("newer cloud"),
+    revision: newRevision,
+  };
+  await ui.signIn();
+  assert.equal(ui.current().checks[0].note, "my draft");
+  assert.equal(ui.state.cloud.data.checks[0].note, "newer cloud");
+  assert.equal(ui.$("saveConflict").hidden, false);
+  assert.equal(ui.$("save").disabled, true);
+  assert.equal(ui.state.writes, 0);
+});
+
+test("a different verified account cannot acquire or save the previous account's unsaved draft", async () => {
+  const ui = await screen();
+  ui.edit("original owner's draft");
+  ui.state.cloud = { ...ui.state.cloud, ownerId: "owner-b" };
+  await ui.signIn();
+  assert.match(ui.$("authMessage").textContent, /account that owns this draft/);
+  assert.equal(ui.current().checks[0].note, "original owner's draft");
+  assert.equal(ui.state.writes, 0);
+});
+
+test("an older workspace response without an owner cannot enable unsafe sign-in recovery", async () => {
+  const ui = await screen({}, { data: workspace("cloud"), revision: oldRevision });
+  assert.equal(ui.current().checks[0].note, "fictional demo");
+  assert.match(ui.$("message").textContent, /Saving protection is not ready/);
+  assert.equal(ui.$("save").disabled, true);
+  assert.equal(ui.state.writes, 0);
+});
+
+test("late sign-in verification cannot undo a deliberate sign-out", async () => {
+  const ui = await screen();
+  const waiting = deferred(),
+    started = deferred();
+  ui.state.authHook = async () => {
+    started.resolve();
+    await waiting.promise;
+  };
+  const pending = ui.signIn();
+  await started.promise;
+  ui.click("signOut");
+  waiting.resolve();
+  await pending;
+  assert.equal(ui.current().checks[0].note, "fictional demo");
+  assert.match(ui.$("message").textContent, /Signed out/);
+});
+
+test("leaving with a dirty draft requests the browser warning; successful save removes it", async () => {
+  const ui = await screen();
+  let prevented = 0;
+  const event = { preventDefault: () => prevented++ };
+  ui.state.unload(event);
+  assert.equal(prevented, 0);
+  ui.edit("unsaved work");
+  ui.state.unload(event);
+  assert.equal(prevented, 1);
+  await ui.click("save");
+  ui.state.unload(event);
+  assert.equal(prevented, 1);
 });

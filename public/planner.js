@@ -62,7 +62,7 @@ export function mountPlanner(initial, onChange = () => {}) {
     } else if (type !== "textarea") input.type = type;
     input.value = obj[key] || "";
     if (type !== "date") input.maxLength = 3000;
-    input.addEventListener("change", () => {
+    input.addEventListener(options ? "change" : "input", () => {
       obj[key] = input.value;
       changed();
       indicators();

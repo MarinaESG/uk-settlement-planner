@@ -160,6 +160,7 @@ test("two invited accounts save, reload and delete only their own records withou
   const loaded = await (await api("workspace?user_id=" + tester.id)).json();
   assert.deepEqual(loaded.data.trips, workspace.trips);
   assert.ok(loaded.updated);
+  assert.equal(loaded.ownerId, owner.id);
   assert.deepEqual((await (await api("workspace", "tester_token")).json()).data, emptyWorkspace());
   assert.equal((await api("workspace", "tester_token", emptyWorkspace(), { "If-None-Match": "*" })).status, 200);
   assert.equal(records.size, 2);
