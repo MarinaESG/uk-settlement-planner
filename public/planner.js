@@ -322,6 +322,14 @@ export function mountPlanner(initial, onChange = () => {}) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     $("message").textContent = "Backup exported. Keep it somewhere private.";
   };
+  const importButton = $("importButton"),
+    importInput = $("import");
+  importButton.onclick = () => importInput.click();
+  importInput.addEventListener("cancel", () => {
+    $("message").textContent =
+      "Backup import cancelled. Your records have not been changed.";
+    importButton.focus();
+  });
   $("import").onchange = async (e) => {
     try {
       const f = e.target.files[0];
@@ -341,6 +349,7 @@ export function mountPlanner(initial, onChange = () => {}) {
           : e.message;
     } finally {
       e.target.value = "";
+      importButton.focus();
     }
   };
   render();
