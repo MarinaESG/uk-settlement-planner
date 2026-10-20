@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createApp } from "../src/server.js";
 import { emptyWorkspace } from "../src/domain.js";
@@ -29,12 +30,13 @@ async function running(t, mock, env = settings) {
   await once(server, "listening");
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = "http://127.0.0.1:" + server.address().port;
-  return (path, token = "owner_token", data) => fetch(base + "/api/" + path, {
+  return (path, token = "owner_token", data, headers = {}) => fetch(base + "/api/" + path, {
     method: data === undefined ? "GET" : "POST",
     headers: {
       Origin: origin,
       ...(token ? { Authorization: "Bearer " + token } : {}),
       "Content-Type": "application/json",
+      ...headers,
     },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
@@ -132,13 +134,19 @@ test("two invited accounts save, reload and delete only their own records withou
     assert.equal(options.headers.apikey, settings.SUPABASE_SECRET_KEY);
     if (options.method === "POST") {
       const row = JSON.parse(options.body);
+      assert.equal(options.headers.Prefer, "resolution=ignore-duplicates,return=representation");
+      if (records.has(row.user_id)) return Response.json([]);
+      row.revision = randomUUID();
+      row.updated_at = new Date().toISOString();
       records.set(row.user_id, row);
-      return new Response(null, { status: 204 });
+      return Response.json([row], { status: 201 });
     }
     const id = u.searchParams.get("user_id").replace(/^eq\./, "");
     if (options.method === "DELETE") {
+      const row = records.get(id);
+      assert.equal(u.searchParams.get("revision"), "eq." + row.revision);
       records.delete(id);
-      return Response.json([]);
+      return Response.json([row]);
     }
     return Response.json(records.has(id) ? [records.get(id)] : []);
   });
@@ -147,15 +155,15 @@ test("two invited accounts save, reload and delete only their own records withou
     evidence: "FICTIONAL preview backup test", status: "User-reported",
   }] };
   // A browser-supplied user_id must never choose the database owner.
-  assert.equal((await api("workspace", "owner_token", { ...workspace, user_id: tester.id })).status, 200);
+  assert.equal((await api("workspace", "owner_token", { ...workspace, user_id: tester.id }, { "If-None-Match": "*" })).status, 200);
   assert.equal(records.has(tester.id), false);
   const loaded = await (await api("workspace?user_id=" + tester.id)).json();
   assert.deepEqual(loaded.data.trips, workspace.trips);
   assert.ok(loaded.updated);
   assert.deepEqual((await (await api("workspace", "tester_token")).json()).data, emptyWorkspace());
-  assert.equal((await api("workspace", "tester_token", emptyWorkspace())).status, 200);
+  assert.equal((await api("workspace", "tester_token", emptyWorkspace(), { "If-None-Match": "*" })).status, 200);
   assert.equal(records.size, 2);
-  assert.equal((await api("workspace/delete?user_id=" + owner.id, "tester_token", {})).status, 200);
+  assert.equal((await api("workspace/delete?user_id=" + owner.id, "tester_token", {}, { "If-Match": `"${records.get(tester.id).revision}"` })).status, 200);
   assert.equal(records.has(owner.id), true);
   assert.equal(records.has(tester.id), false);
   // Invalid edits must not overwrite the existing valid record.

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createApp } from "../src/server.js";
 import { emptyWorkspace } from "../src/domain.js";
+const REVISION = "11111111-1111-4111-8111-111111111111";
 const ID = "00000000-0000-4000-8000-000000000001";
 const config = {
   SUPABASE_URL: "https://example.supabase.co",
@@ -44,14 +45,18 @@ async function setup(t, overrides = {}) {
       return Response.json([{ stripe_customer_id: "cus_own" }]);
     if (path === "/rest/v1/workspaces") {
       if (options.method === "POST") {
-        state.saved = JSON.parse(options.body);
-        return new Response(null, { status: 201 });
+        assert.equal(options.headers.Prefer, "resolution=ignore-duplicates,return=representation");
+        state.saved = { ...JSON.parse(options.body), revision: REVISION, updated_at: new Date().toISOString() };
+        return Response.json([state.saved], { status: 201 });
       }
       if (options.method === "DELETE") {
+        assert.equal(url.searchParams.get("revision"), "eq." + REVISION);
         state.deleted = true;
-        return Response.json([]);
+        const row = state.saved;
+        state.saved = null;
+        return Response.json([row]);
       }
-      return Response.json([{ data: state.saved?.data || emptyWorkspace() }]);
+      return Response.json(state.saved ? [state.saved] : []);
     }
     if (path === "/v1/subscriptions")
       return Response.json({
@@ -126,23 +131,24 @@ async function setup(t, overrides = {}) {
   await once(server, "listening");
   t.after(() => new Promise((r) => server.close(r)));
   const root = "http://127.0.0.1:" + server.address().port;
-  const call = (path, body) =>
+  const call = (path, body, headers = {}) =>
     fetch(root + "/api/" + path, {
       method: body === undefined ? "GET" : "POST",
       headers: {
         Authorization: "Bearer fictional_token",
         Origin: "http://localhost:8780",
         "Content-Type": "application/json",
+        ...headers,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   return { state, call };
 }
-test("active subscriber saves; provider empty 201 response succeeds; cancellation stops save but allows export and deletion", async (t) => {
+test("active subscriber saves with a revision; cancellation stops save but allows export and guarded deletion", async (t) => {
   const { state, call } = await setup(t),
     data = emptyWorkspace();
   data.checks[0].note = "FICTIONAL owner reference";
-  assert.equal((await call("workspace", data)).status, 200);
+  assert.equal((await call("workspace", data, { "If-None-Match": "*" })).status, 200);
   assert.equal(state.saved.user_id, ID);
   assert.equal(state.saved.data.checks[0].note, data.checks[0].note);
   state.status = "canceled";
@@ -153,7 +159,7 @@ test("active subscriber saves; provider empty 201 response succeeds; cancellatio
     (await exported.json()).data.checks[0].note,
     data.checks[0].note,
   );
-  assert.equal((await call("workspace/delete", {})).status, 200);
+  assert.equal((await call("workspace/delete", {}, { "If-Match": `"${REVISION}"` })).status, 200);
   assert.ok(state.deleted);
 });
 test("successful redirect and query parameters alone cannot unlock a download; refunded charge is denied", async (t) => {

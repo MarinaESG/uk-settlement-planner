@@ -2,33 +2,104 @@ import { mountPlanner, fictional, $, el } from "/planner.js";
 import { emptyWorkspace, validateWorkspace } from "/domain.js";
 let config,
   token = sessionStorage.getItem("sp-session") || "",
-  product = "";
+  product = "",
+  revision,
+  conflict = false,
+  saving = false,
+  changes = 0;
 const planner = mountPlanner(fictional(), () => {
-  $("message").textContent =
-    "Changes on screen are unsaved. Export a backup or save to your account.";
+  changes++;
+  $("message").textContent = conflict
+    ? "Changes on screen are unsaved. Export a backup before loading the latest saved records."
+    : "Changes on screen are unsaved. Export a backup or save to your account.";
 });
-async function api(path, method = "GET", data) {
+async function api(path, method = "GET", data, headers = {}) {
   const r = await fetch("/api/" + path, {
     method,
     headers: {
       ...(token ? { Authorization: "Bearer " + token } : {}),
       ...(data ? { "Content-Type": "application/json" } : {}),
+      ...headers,
     },
     body: data ? JSON.stringify(data) : undefined,
   });
   if (!r.ok) {
     const d = await r.json();
-    throw Error(d.error || "Request failed.");
+    const error = Error(d.error || "Request failed.");
+    error.status = r.status;
+    throw error;
   }
   return r;
 }
 function message(e) {
   $("message").textContent = e.message || String(e);
 }
+function setConflict(value) {
+  conflict = value;
+  $("saveConflict").hidden = !value;
+  $("save").disabled = saving || conflict;
+  $("delete").disabled = saving || conflict;
+}
+function precondition() {
+  if (revision === undefined) {
+    setConflict(true);
+    throw Error(
+      "Load your saved records before saving. Your changes are still on this page; export a backup to keep them.",
+    );
+  }
+  return revision === null
+    ? { "If-None-Match": "*" }
+    : { "If-Match": `"${revision}"` };
+}
+async function workspaceAction(fn) {
+  if (saving) return;
+  saving = true;
+  for (const id of [
+    "save",
+    "delete",
+    "loadLatest",
+    "loadDemo",
+    "signIn",
+    "signOut",
+  ])
+    $(id).disabled = true;
+  try {
+    await fn();
+  } catch (e) {
+    if (e.status === 409 || e.status === 428) {
+      setConflict(true);
+      message(
+        "Save stopped to protect your records. Your unsaved changes are still on this page.",
+      );
+    } else {
+      message(e);
+    }
+  } finally {
+    saving = false;
+    for (const id of ["loadLatest", "loadDemo", "signIn", "signOut"])
+      $(id).disabled = false;
+    setConflict(conflict);
+  }
+}
 async function account() {
   if (!token) return;
+  const started = changes;
+  const session = token;
   const w = await (await api("workspace")).json();
+  if (token !== session) return false;
+  if (started !== changes) {
+    setConflict(true);
+    throw Error(
+      "You made more changes while records were loading. They are still on this page. Export a backup before trying again.",
+    );
+  }
+  if (!Object.hasOwn(w, "revision"))
+    throw Error(
+      "Saving protection is not ready. Keep this page open and export your changes.",
+    );
   planner.set(w.data);
+  revision = w.revision;
+  setConflict(false);
   $("mode").textContent = config.privatePreview
     ? "PRIVATE PREVIEW · SAVE CHANGES"
     : "ACCOUNT RECORDS · SAVE CHANGES";
@@ -45,6 +116,7 @@ async function account() {
       ".";
   }
   message("");
+  return true;
 }
 function routes() {
   const q = $("routeSearch").value.toLowerCase(),
@@ -125,6 +197,7 @@ $("authForm").onsubmit = async (e) => {
     ).json();
     if (!a.token) throw Error("No session returned.");
     token = a.token;
+    revision = undefined;
     sessionStorage.setItem("sp-session", token);
     await account();
     $("auth").close();
@@ -133,11 +206,33 @@ $("authForm").onsubmit = async (e) => {
   }
 };
 $("save").onclick = () =>
-  action(async () => {
+  workspaceAction(async () => {
     if (!token) throw Error("Sign in before saving.");
-    validateWorkspace(planner.get());
-    await api("workspace", "POST", planner.get());
-    $("message").textContent = "Workspace saved to your account.";
+    if (conflict) return;
+    const data = structuredClone(validateWorkspace(planner.get()));
+    const started = changes;
+    const saved = await (
+      await api("workspace", "POST", data, precondition())
+    ).json();
+    revision = saved.revision;
+    $("message").textContent =
+      started === changes
+        ? "Workspace saved to your account."
+        : "Your earlier changes were saved. You have newer unsaved changes on this page.";
+  });
+$("loadLatest").onclick = () =>
+  workspaceAction(async () => {
+    if (!token) throw Error("Sign in before loading saved records.");
+    if (
+      !confirm(
+        "Replace the unsaved records on this page with the latest saved records? Export a backup first to keep your changes.",
+      )
+    )
+      return;
+    if (await account())
+      message(
+        "Latest saved records loaded. Review them before making further changes.",
+      );
   });
 $("loadDemo").onclick = () => {
   if (
@@ -145,6 +240,7 @@ $("loadDemo").onclick = () => {
       "Replace on-screen records with the fictional example? Saved account records will not change.",
     )
   ) {
+    changes++;
     planner.set(fictional());
     $("mode").textContent = "FICTIONAL DEMO · NOT SAVED";
     message("Fictional demo loaded.");
@@ -155,7 +251,10 @@ $("demoLink").onclick = () => {
     "The initial trip and permission are fictional. Explore the three tabs; nothing is saved automatically.";
 };
 $("signOut").onclick = () => {
+  changes++;
   token = "";
+  revision = undefined;
+  setConflict(false);
   sessionStorage.removeItem("sp-session");
   planner.set(fictional());
   $("mode").textContent = "FICTIONAL DEMO · NOT SAVED";
@@ -164,14 +263,18 @@ $("signOut").onclick = () => {
   message("Signed out of this planner tab.");
 };
 $("delete").onclick = () =>
-  action(async () => {
+  workspaceAction(async () => {
+    if (!token) throw Error("Sign in before deleting saved records.");
+    const headers = precondition();
     if (
       !confirm(
         "Permanently delete the workspace saved in your account? Export first if you need a copy.",
       )
     )
       return;
-    await api("workspace/delete", "POST", {});
+    await api("workspace/delete", "POST", {}, headers);
+    revision = null;
+    setConflict(false);
     planner.set(emptyWorkspace());
     message(
       "Saved workspace deleted. Billing and account email remain; contact support for full account deletion.",

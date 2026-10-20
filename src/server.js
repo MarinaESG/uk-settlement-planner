@@ -101,6 +101,33 @@ export function createApp(env = process.env, request = fetch) {
       body: data === undefined ? undefined : JSON.stringify(data),
     });
   }
+  // A precondition is mandatory: clients from before this change must fail
+  // closed rather than making an unconditional write.
+  function workspaceRevision(req) {
+    const match = req.headers["if-match"];
+    const none = req.headers["if-none-match"];
+    if (match === undefined && none === undefined)
+      fail(
+        428,
+        "This page needs to be refreshed before saving. Export your unsaved changes first, then refresh and load your saved records.",
+      );
+    if (match === undefined && none === "*") return null;
+    if (
+      none === undefined &&
+      /^"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"$/.test(match)
+    )
+      return match.slice(1, -1);
+    fail(
+      400,
+      "Invalid saved-record version. Export your changes, then reload your saved records.",
+    );
+  }
+  function workspaceConflict() {
+    fail(
+      409,
+      "Your saved records changed in another tab or session. Your changes on this page have not been saved. Export a backup before loading the latest saved records.",
+    );
+  }
   async function stripe(path, method = "GET", data, key) {
     return remote("https://api.stripe.com/v1/" + path, {
       method,
@@ -315,11 +342,19 @@ export function createApp(env = process.env, request = fetch) {
         const u = await user(req);
         if (path === "/api/workspace" && req.method === "GET") {
           const rows = await db(
-            "workspaces?user_id=eq." + u.id + "&select=data,updated_at",
+            "workspaces?user_id=eq." +
+              u.id +
+              "&select=data,updated_at,revision",
           );
+          if (rows.length && !rows[0].revision)
+            fail(
+              503,
+              "Saving protection is not ready. Your records have not been changed. Please contact support.",
+            );
           return send(200, {
             data: rows[0]?.data || emptyWorkspace(),
             updated: rows[0]?.updated_at || null,
+            revision: rows[0]?.revision || null,
           });
         }
         if (path === "/api/workspace" && req.method === "POST") {
@@ -338,25 +373,55 @@ export function createApp(env = process.env, request = fetch) {
           } catch (e) {
             fail(400, e.message);
           }
-          await remote(
-            env.SUPABASE_URL + "/rest/v1/workspaces?on_conflict=user_id",
-            {
-              method: "POST",
-              headers: {
-                ...databaseHeaders,
-                Prefer: "resolution=merge-duplicates",
-              },
-              body: JSON.stringify({
-                user_id: u.id,
-                data,
-                updated_at: new Date().toISOString(),
-              }),
-            },
-          );
-          return send(200, { saved: true });
+          const revision = workspaceRevision(req);
+          // The revision filter and update are one database operation, including
+          // when requests reach different server instances at the same time.
+          const rows =
+            revision === null
+              ? await remote(
+                  env.SUPABASE_URL + "/rest/v1/workspaces?on_conflict=user_id",
+                  {
+                    method: "POST",
+                    headers: {
+                      ...databaseHeaders,
+                      Prefer:
+                        "resolution=ignore-duplicates,return=representation",
+                    },
+                    body: JSON.stringify({ user_id: u.id, data }),
+                  },
+                )
+              : await db(
+                  "workspaces?user_id=eq." + u.id + "&revision=eq." + revision,
+                  "PATCH",
+                  { data },
+                );
+          if (!rows?.length) workspaceConflict();
+          if (!rows[0].revision)
+            fail(
+              503,
+              "The save could not be confirmed. Keep this page open and export a backup before reloading.",
+            );
+          return send(200, {
+            saved: true,
+            revision: rows[0].revision,
+            updated: rows[0].updated_at,
+          });
         }
         if (path === "/api/workspace/delete" && req.method === "POST") {
-          await db("workspaces?user_id=eq." + u.id, "DELETE");
+          const revision = workspaceRevision(req);
+          if (revision === null) {
+            // Nothing was loaded, so never delete a record created since then.
+            const rows = await db(
+              "workspaces?user_id=eq." + u.id + "&select=revision",
+            );
+            if (rows.length) workspaceConflict();
+          } else {
+            const rows = await db(
+              "workspaces?user_id=eq." + u.id + "&revision=eq." + revision,
+              "DELETE",
+            );
+            if (!rows?.length) workspaceConflict();
+          }
           return send(200, { deleted: true });
         }
         if (!commerce)

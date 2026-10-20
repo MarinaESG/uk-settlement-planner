@@ -62,7 +62,7 @@ test("unauthenticated requests fail before database access; configured accounts 
     if (url.includes("/rest/v1/workspaces?user_id=eq." + id)) {
       assert.equal(options.headers.apikey, env.SUPABASE_SERVICE_ROLE_KEY);
       assert.equal(options.headers.Authorization, "Bearer fictional_service");
-      return Response.json([{ data: emptyWorkspace() }]);
+      return Response.json([{ data: emptyWorkspace(), revision: "11111111-1111-4111-8111-111111111111" }]);
     }
     throw Error("Unexpected external request");
   };
@@ -141,7 +141,7 @@ test("current keys support code sign-in without exposing keys or overriding the 
       assert.equal(new URL(url).searchParams.get("user_id"), "eq." + id);
       assert.equal(options.headers.apikey, env.SUPABASE_SECRET_KEY);
       assert.equal(options.headers.Authorization, undefined);
-      return Response.json([{ data: emptyWorkspace() }]);
+      return Response.json([{ data: emptyWorkspace(), revision: "11111111-1111-4111-8111-111111111111" }]);
     }
     throw Error("Unexpected external request");
   };

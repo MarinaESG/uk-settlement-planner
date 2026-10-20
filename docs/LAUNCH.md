@@ -32,6 +32,47 @@ For initial local email tests, set Site URL and `APP_ORIGIN` to `http://localhos
 
 Sessions are stored in browser session storage. There is no automatic refresh: an expired session requires a new email code. The app never sends workspace records to Stripe. Deleting a workspace does not delete the Supabase identity or legally required payment records; the operator must provide a separate full-account request process.
 
+### Safe saving across tabs
+
+Every saved workspace has a database-generated revision. Loading returns that
+revision; saving or deleting must present the same revision. A conditional
+database update checks it atomically, so two server instances cannot both accept
+changes based on the same saved version. A first save uses insert-if-absent.
+The database trigger changes the revision on every insert/update, including
+administrative changes. Deleting and recreating a workspace gives it a new
+revision.
+
+A stale request receives HTTP 409 without replacing the current record. The
+browser retains its draft, shows a persistent warning and disables save/delete.
+Export remains available. **Load latest saved records** asks for confirmation
+before replacing the on-screen draft; cancelling leaves it untouched. The app
+does not automatically merge or force an overwrite. JSON backups contain the
+workspace data, not a revision that could bypass the currently loaded version.
+Draft preservation means keeping changes on the open page; export before
+refreshing, closing the tab or signing out.
+
+For an **existing Supabase installation**, release in this order:
+
+1. Export a backup of the fictional test workspace and record its current data
+   and timestamp.
+2. Apply `supabase/migrations/20261020_workspace_revisions.sql` to the intended
+   project **before deploying the updated server**. It adds revisions without
+   changing existing workspace data/timestamps, retaining RLS and table grants.
+   It can be rerun safely and requests a PostgREST schema-cache reload.
+3. Deploy the matching server and browser code promptly. Until the old server is
+   replaced, it still allows unconditional writes. Old browser tabs calling the
+   new server receive HTTP 428, telling users to export before refreshing.
+4. Keep both payment flags disabled and retain the existing preview invite list.
+   Test two tabs with fictional data: save A, reject stale B, check B's draft and
+   export, cancel loading, then confirm loading and save a deliberate new edit.
+   Compare the stored record and revision before/after the rejection.
+
+Fresh installations use `supabase/schema.sql`, which includes this migration.
+Do not roll back to an unconditional-write server as a recovery shortcut. If
+release checks fail, stop saving while investigating and retain the revision
+column/trigger and backups. Local mock and embedded PostgreSQL checks do not
+replace the hosted PostgREST acceptance check.
+
 ### Invitation-only preview without payments
 
 Use a separate Supabase preview project so local Stripe sandbox tests remain isolated. Apply the schema and email setup above. Use fictional workspace records until the public service and privacy arrangements are complete.

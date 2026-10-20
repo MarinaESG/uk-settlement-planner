@@ -144,6 +144,15 @@
           ><button id="signOut">Sign out</button>
         </div>
         <p id="message" role="status" aria-live="polite"></p>
+        <div id="saveConflict" class="notice" role="alert" hidden>
+          <p>
+            Your saved records changed in another tab or session. Your unsaved
+            changes are still on this page. Export a backup to keep them before
+            loading the latest saved records. Loading will replace what is on
+            screen.
+          </p>
+          <button id="loadLatest">Load latest saved records</button>
+        </div>
         <label>Planning route<select id="route"></select></label>
         <p id="routeNote" class="notice"></p>
         <div class="tabs" role="group" aria-label="Workspace sections">
