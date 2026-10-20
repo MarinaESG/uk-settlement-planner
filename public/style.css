@@ -561,3 +561,8 @@ dialog h2 {
     font-size: 30px;
   }
 }
+
+/* Honour hidden recovery controls despite the shared button display rule. */
+[hidden] {
+  display: none !important;
+}
