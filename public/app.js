@@ -1,9 +1,18 @@
 import { mountPlanner, fictional, $, el } from "/planner.js";
 import { emptyWorkspace, validateWorkspace } from "/domain.js";
 const draftKey = "msr-tab-draft-v1";
+const devicePrefix = "msr-device-draft-v1:";
+const recoveryLifetime = 7 * 24 * 60 * 60 * 1000;
 let draftStorageIssue = "",
   draftKept = false,
-  draftRecovered = false;
+  draftRecovered = false,
+  deviceKept = false,
+  deviceIssue = "",
+  deviceReadIssue = "",
+  deviceCopyKey = null,
+  lastDraftContent = "",
+  deviceListSignature = "";
+let recoveryKeys = new Set();
 function sessionToken() {
   try {
     return sessionStorage.getItem("sp-session") || "";
@@ -33,26 +42,66 @@ function checkDraftData(data) {
   validateWorkspace(copy);
   return data;
 }
+function checkedDraft(raw) {
+  if (!raw || raw.length > 165000) throw Error("Invalid draft size");
+  const draft = JSON.parse(raw);
+  if (
+    draft.version !== 1 ||
+    typeof draft.ownerId !== "string" || !draft.ownerId ||
+    !(draft.revision === null || typeof draft.revision === "string") ||
+    typeof draft.failed !== "boolean" ||
+    (draft.recoveryKeys !== undefined &&
+      (!Array.isArray(draft.recoveryKeys) || draft.recoveryKeys.length > 100 ||
+        draft.recoveryKeys.some((key) => !validDeviceKey(key))))
+  ) throw Error("Invalid draft");
+  checkDraftData(draft.data);
+  return draft;
+}
+function validDeviceKey(key) {
+  return typeof key === "string" &&
+    /^msr-device-draft-v1:[a-f0-9-]{36}$/.test(key);
+}
 function readTabDraft() {
   try {
     const raw = sessionStorage.getItem(draftKey);
     if (!raw) return null;
-    if (raw.length > 152000) throw Error("Draft too large");
-    const draft = JSON.parse(raw);
-    if (
-      draft.version !== 1 ||
-      typeof draft.ownerId !== "string" || !draft.ownerId ||
-      !(draft.revision === null || typeof draft.revision === "string") ||
-      typeof draft.failed !== "boolean"
-    ) throw Error("Invalid draft");
-    checkDraftData(draft.data);
-    return draft;
+    return checkedDraft(raw);
   } catch {
     draftStorageIssue = "We couldn’t read a recovery copy in this tab. Keep any JSON backups. Browser draft recovery may be unavailable.";
     return null;
   }
 }
+function readDeviceDrafts() {
+  deviceReadIssue = "";
+  const copies = [];
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (validDeviceKey(key)) keys.push(key);
+    }
+    for (const key of keys) {
+      try {
+        const draft = checkedDraft(localStorage.getItem(key));
+        if (!Number.isFinite(draft.editedAt) || draft.editedAt > Date.now() + 60000)
+          throw Error("Invalid recovery date");
+        if (Date.now() - draft.editedAt > recoveryLifetime) {
+          localStorage.removeItem(key);
+          continue;
+        }
+        copies.push({ key, ...draft });
+      } catch {
+        deviceReadIssue = "Some recovery copies on this device could not be read. Keep your JSON backups.";
+      }
+    }
+  } catch {
+    deviceReadIssue = "Device recovery storage is unavailable. Keep a JSON backup before leaving this page.";
+  }
+  return copies.sort((a, b) => b.editedAt - a.editedAt);
+}
+let deviceDrafts = readDeviceDrafts();
 let pendingDraft = readTabDraft();
+if (pendingDraft) recoveryKeys = new Set(pendingDraft.recoveryKeys || []);
 let config,
   token = sessionToken(),
   product = "",
@@ -106,15 +155,47 @@ function rememberDraft() {
   try {
     if (dirty || !$("saveFailure").hidden) {
       const data = checkDraftData(planner.get());
-      sessionStorage.setItem(draftKey, JSON.stringify({
+      const draft = {
         version: 1, ownerId, revision, data, savedAt,
         failed: !$("saveFailure").hidden,
-      }));
-      draftKept = true;
+      };
+      const content = JSON.stringify(draft);
+      // Every device snapshot has an immutable key. Another tab can create a
+      // newer snapshot while this one is being recovered or removed safely.
+      try {
+        if (content !== lastDraftContent || !deviceCopyKey ||
+            !localStorage.getItem(deviceCopyKey)) {
+          const nextKey = devicePrefix + crypto.randomUUID();
+          localStorage.setItem(nextKey, JSON.stringify({
+            ...draft, editedAt: Date.now(), recoveryKeys: [...recoveryKeys].slice(-99),
+          }));
+          const previous = deviceCopyKey;
+          deviceCopyKey = nextKey;
+          lastDraftContent = content;
+          if (previous) {
+            try { localStorage.removeItem(previous); } catch { recoveryKeys.add(previous); }
+          }
+        }
+        deviceKept = true;
+        deviceIssue = "";
+      } catch {
+        deviceKept = false;
+        deviceIssue = "The latest edit could not be kept on this device. Save or export a JSON backup before using Safari’s address bar or closing the tab.";
+      }
+      try {
+        sessionStorage.setItem(draftKey, JSON.stringify({
+          ...draft, recoveryKeys: [...recoveryKeys, ...(deviceCopyKey ? [deviceCopyKey] : [])].slice(-100),
+        }));
+        draftKept = true;
+      } catch {
+        draftKept = deviceKept;
+      }
+      if (!draftKept) throw Error("No recovery storage available");
       draftStorageIssue = "";
     } else {
-      sessionStorage.removeItem(draftKey);
+      clearCurrentRecovery();
       draftKept = false;
+      deviceKept = false;
       draftRecovered = false;
     }
   } catch {
@@ -124,31 +205,108 @@ function rememberDraft() {
     try { sessionStorage.removeItem(draftKey); } catch { /* Storage is blocked. */ }
   }
 }
+function clearCurrentRecovery() {
+  let cleared = true;
+  for (const key of new Set([...recoveryKeys, deviceCopyKey].filter(Boolean))) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw || checkedDraft(raw).ownerId === ownerId) localStorage.removeItem(key);
+      recoveryKeys.delete(key);
+      if (deviceCopyKey === key) deviceCopyKey = null;
+    } catch { cleared = false; }
+  }
+  try { sessionStorage.removeItem(draftKey); } catch { cleared = false; }
+  if (!cleared) deviceIssue = "An old recovery copy could not be removed from this browser. Keep your backup and clear this site's browser data before leaving a shared device.";
+  else deviceIssue = "";
+  lastDraftContent = "";
+  return cleared;
+}
+function renderDeviceRecovery() {
+  deviceDrafts = readDeviceDrafts();
+  const activeKeys = new Set([...recoveryKeys, deviceCopyKey].filter(Boolean));
+  // A later copy references earlier snapshots. Show each branch once, without
+  // deleting its ancestors until that branch is saved or deliberately discarded.
+  const candidates = deviceDrafts.filter((draft) =>
+    draft.ownerId === ownerId && !activeKeys.has(draft.key) &&
+    !deviceDrafts.some((other) => other.ownerId === ownerId &&
+      (other.recoveryKeys || []).includes(draft.key)));
+  $("deviceRecovery").hidden = !authenticated || expired || !candidates.length;
+  const signature = JSON.stringify([authenticated, expired, saving, candidates.map((d) => d.key)]);
+  if (signature === deviceListSignature) return;
+  deviceListSignature = signature;
+  $("deviceDraftList").replaceChildren();
+  if (!authenticated || expired) return;
+  for (const draft of candidates) {
+    const item = el("div"),
+      title = el("p", "Draft from " + new Date(draft.editedAt).toLocaleString("en-GB")),
+      restore = el("button", "Recover this draft");
+    restore.type = "button";
+    restore.disabled = saving;
+    restore.onclick = () => recoverDeviceDraft(draft.key);
+    item.append(title, el("p", `${draft.data.trips.length} ${draft.data.trips.length === 1 ? "trip" : "trips"} · ${draft.data.permissions.length} permission ${draft.data.permissions.length === 1 ? "record" : "records"}`), restore);
+    $("deviceDraftList").append(item);
+  }
+}
+function recoverDeviceDraft(key) {
+  return workspaceAction(async () => {
+    if (!authenticated || expired) throw Error("Sign in to recover your draft.");
+    const draft = readDeviceDrafts().find((copy) => copy.key === key);
+    if (!draft || draft.ownerId !== ownerId)
+      throw Error("This recovery copy is not available for this account.");
+    if (dirty && !confirm("Replace the on-screen edits with this recovery copy? Your current recovery copy will remain available on this device.")) return;
+    const started = changes, session = token;
+    const w = await (await api("workspace")).json();
+    if (session !== token || changes !== started || w.ownerId !== ownerId ||
+        !Object.hasOwn(w, "revision"))
+      throw Error("Recovery stopped because the workspace changed. Your on-screen edits are still here.");
+    // Leave any different on-screen draft in device storage for later recovery.
+    deviceCopyKey = null;
+    lastDraftContent = "";
+    recoveryKeys = new Set([key, ...(draft.recoveryKeys || [])]);
+    planner.set(structuredClone(draft.data));
+    revision = draft.revision;
+    savedAt = w.updated;
+    dirty = true;
+    changes++;
+    draftRecovered = true;
+    $("saveFailure").hidden = $("saveFailure").hidden && !draft.failed;
+    setConflict(w.revision !== revision);
+    message("Your unsaved draft was recovered from this device. Review it before saving. Your cloud records have not been changed.");
+  });
+}
 function updateStatus() {
   if (pendingDraft?.failed) $("saveFailure").hidden = false;
   rememberDraft();
-  $("draftRecovery").hidden = !(pendingDraft || draftKept || draftStorageIssue);
+  renderDeviceRecovery();
+  const deviceWaiting = !authenticated && deviceDrafts.length > 0;
+  $("draftRecovery").hidden = !(pendingDraft || draftKept || draftStorageIssue || deviceWaiting || deviceIssue || deviceReadIssue);
   $("draftRecovery").textContent = pendingDraft
     ? "An unsaved draft is waiting in this browser tab. Sign in to the same account to recover it. Your cloud records have not been changed."
-    : draftStorageIssue || (draftRecovered
+    : deviceWaiting
+      ? "Recovery copies are available on this device. Sign in to review the drafts belonging to your account. Your cloud records have not been changed."
+    : draftStorageIssue || deviceIssue || deviceReadIssue || (draftRecovered
       ? expired
         ? "Your unsaved draft was recovered after refresh. Sign in again to save it. Your cloud records have not been changed."
         : conflict
           ? "Your unsaved draft was recovered after refresh. A newer cloud version exists. Export this draft before loading the latest saved records."
           : "Your unsaved draft was recovered after refresh. It has not been saved to your account. Review it, then choose Save to account."
-      : "A recovery copy of your unsaved edits is kept in this browser tab. It survives refresh; it is not a cloud save. Closing the tab or clearing browser data can remove it. Keep regular JSON backups.");
-  $("workspaceEditor").hidden = Boolean(pendingDraft);
+      : deviceKept
+        ? "A recovery copy of your unsaved edits is kept on this device for up to seven days. If Safari loses sign-in, sign back in and choose Recover this draft. This is not a cloud save. Clearing browser data can remove it; keep regular JSON backups."
+        : "A recovery copy is kept in this tab only. Save or export a JSON backup before using Safari’s address bar or closing the tab.");
+  $("workspaceEditor").hidden = Boolean(pendingDraft || deviceWaiting);
   for (const id of ["importButton", "export"])
-    $(id).disabled = Boolean(pendingDraft);
-  $("loadDemo").disabled = saving || Boolean(pendingDraft);
-  $("storageStatus").textContent = pendingDraft
+    $(id).disabled = Boolean(pendingDraft || deviceWaiting);
+  $("loadDemo").disabled = saving || Boolean(pendingDraft || deviceWaiting);
+  $("storageStatus").textContent = pendingDraft || deviceWaiting
     ? "Unsaved draft waiting — sign in to recover"
     : expired
     ? "Sign-in expired — edits remain on this page"
     : saving
       ? "Updating account records…"
       : dirty
-        ? draftKept
+        ? deviceKept
+          ? "Unsaved changes — recovery copy kept on this device"
+          : draftKept
           ? "Unsaved changes — recovery copy kept in this tab"
           : "Unsaved changes — held on this page only"
         : authenticated
@@ -169,8 +327,8 @@ function updateStatus() {
   $("delete").hidden = !authenticated || expired;
   $("save").hidden = expired;
   $("save").disabled = saving || conflict || !authenticated;
-  $("resumeSignIn").hidden = !expired && !pendingDraft;
-  $("resumeSignIn").textContent = pendingDraft
+  $("resumeSignIn").hidden = !expired && !pendingDraft && !deviceWaiting;
+  $("resumeSignIn").textContent = pendingDraft || deviceWaiting
     ? "Sign in to recover my draft"
     : "Sign in again — keep my draft";
   $("resumeSignIn").disabled = saving;
@@ -490,19 +648,24 @@ $("demoLink").onclick = () => {
     "The initial trip and permission are fictional. Explore the three tabs; nothing is saved automatically.";
 };
 $("signOut").onclick = () => {
+  const departingOwner = ownerId || pendingDraft?.ownerId;
+  const ownedCopies = readDeviceDrafts().filter((draft) => draft.ownerId === departingOwner);
   if (
-    (dirty || pendingDraft) &&
+    (dirty || pendingDraft || ownedCopies.length) &&
     !confirm(
-      "Sign out and discard unsaved edits on this page? Cancel and export a JSON backup first to keep them.",
+      "Sign out and discard unsaved edits and this account’s recovery copies on this device? Cancel and export a JSON backup first to keep them.",
     )
-  )
-    return;
-  try { sessionStorage.removeItem(draftKey); } catch {
-    message("This browser could not clear its draft copy. Clear this site's browser data before leaving a shared device.");
-    return;
-  }
+  ) return;
+  for (const copy of ownedCopies) recoveryKeys.add(copy.key);
+  // Use the departing account for cleanup, even if a refreshed tab is awaiting sign-in.
+  ownerId = departingOwner;
+  const cleared = clearCurrentRecovery() && !deviceReadIssue;
+  recoveryKeys.clear();
+  deviceCopyKey = null;
+  lastDraftContent = "";
   pendingDraft = null;
   draftKept = false;
+  deviceKept = false;
   draftRecovered = false;
   draftStorageIssue = "";
   authAttempt++;
@@ -521,7 +684,7 @@ $("signOut").onclick = () => {
   $("mode").textContent = "FICTIONAL DEMO · NOT SAVED";
   $("accountStatus").textContent =
     "Signed out. Account records are no longer on screen.";
-  message("Signed out of this planner tab.");
+  message(cleared ? "Signed out of this planner tab." : "Signed out. A recovery copy could not be cleared; clear this site’s browser data before leaving a shared device.");
   updateStatus();
 };
 $("delete").onclick = () =>
@@ -647,7 +810,7 @@ try {
       "Use the email address invited by the operator. Only invited, verified accounts can access the private preview.";
   }
   $("dataHandling").textContent +=
-    " Unsaved account edits are also kept temporarily in this browser tab for refresh recovery when browser storage is available. This is not a cloud save or permanent backup. Signing out clears this copy; closing the tab or clearing browser data can remove it.";
+    " Unsaved account edits are kept in this tab and, when storage is available, on this device for recovery for up to seven days. Use your own device: recovery copies contain your workspace records. They are not cloud saves. Signing out removes this account’s recovery copies from this browser. Clearing browser data can also remove them; keep regular JSON backups.";
   $("operator").textContent =
     "Operator: " +
     config.operator +

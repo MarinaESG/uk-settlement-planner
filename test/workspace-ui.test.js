@@ -1,4 +1,5 @@
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
@@ -26,6 +27,7 @@ const deferred = () => {
 // Browser acceptance also checks the real form, export download and warning.
 async function screen(configOverrides = {}, initialCloud, options = {}) {
   const storage = options.storage || new Map([["sp-session", "fictional-session"]]);
+  const deviceStorage = options.deviceStorage || new Map();
   const nodes = new Map();
   const $ = (id) => {
     if (!nodes.has(id))
@@ -128,7 +130,8 @@ async function screen(configOverrides = {}, initialCloud, options = {}) {
     fictional: () => workspace("fictional demo"),
     emptyWorkspace,
     validateWorkspace,
-    el: () => ({ ...$("element") }),
+    el: (tag, text) => ({ ...$("element"), tag, textContent: text || "", children: [] }),
+    crypto: { randomUUID },
     structuredClone,
     fetch,
     URL,
@@ -143,6 +146,25 @@ async function screen(configOverrides = {}, initialCloud, options = {}) {
       hash: "",
       assign() {
         throw Error("No navigation expected");
+      },
+    },
+    localStorage: {
+      get length() {
+        if (options.deviceReadBlocked) throw Error("Device storage blocked");
+        return deviceStorage.size;
+      },
+      key: (index) => [...deviceStorage.keys()][index],
+      getItem: (key) => {
+        if (options.deviceReadBlocked) throw Error("Device storage blocked");
+        return deviceStorage.get(key) || null;
+      },
+      setItem: (key, value) => {
+        if (options.deviceWriteBlocked) throw Error("Device storage full");
+        deviceStorage.set(key, value);
+      },
+      removeItem: (key) => {
+        if (options.deviceRemoveBlocked) throw Error("Device storage cannot be cleared");
+        deviceStorage.delete(key);
       },
     },
     sessionStorage: {
@@ -165,6 +187,8 @@ async function screen(configOverrides = {}, initialCloud, options = {}) {
     $,
     state,
     storage,
+    deviceStorage,
+    recoveryButtons: () => $("deviceDraftList").children.flatMap((item) => item.children.filter((n) => n.tag === "button")),
     current: () => structuredClone(current),
     edit: (note) => {
       current.checks[0].note = note;
@@ -175,7 +199,7 @@ async function screen(configOverrides = {}, initialCloud, options = {}) {
       changed(current);
     },
     reload: (overrides = {}) => screen(configOverrides, state.cloud, {
-      ...options, storage, ...overrides,
+      ...options, storage, deviceStorage, ...overrides,
     }),
     click: (id) => $(id).onclick(),
     signIn: () => $("authForm").onsubmit({ preventDefault() {} }),
@@ -740,10 +764,11 @@ test("unfinished date edits survive refresh but strict cloud save validation sti
 });
 
 test("storage quota failure is explicit and an older recovery copy is not mistaken for the latest draft", async () => {
-  const options = {storageWriteBlocked:false};
+  const options = {storageWriteBlocked:false, deviceWriteBlocked:false};
   const ui = await screen({},undefined,options);
   ui.edit("old edit");
   options.storageWriteBlocked = true;
+  options.deviceWriteBlocked = true;
   ui.edit("latest edit after quota failure");
   assert.equal(ui.current().checks[0].note,"latest edit after quota failure");
   assert.equal(ui.storage.has("msr-tab-draft-v1"),false);
@@ -756,7 +781,7 @@ test("storage quota failure is explicit and an older recovery copy is not mistak
 });
 
 test("blocked storage does not crash the app or claim draft protection", async () => {
-  const ui = await screen({},undefined,{storageReadBlocked:true,storageWriteBlocked:true});
+  const ui = await screen({},undefined,{storageReadBlocked:true,storageWriteBlocked:true,deviceReadBlocked:true,deviceWriteBlocked:true});
   assert.equal(ui.$("save").disabled,true);
   assert.match(ui.$("draftRecovery").textContent,/recovery may be unavailable/);
   await ui.signIn();
@@ -812,4 +837,230 @@ test("independent tabs keep separate recovery drafts", async () => {
   b.edit("tab B draft");
   assert.equal((await a.reload()).current().checks[0].note,"tab A draft");
   assert.equal((await b.reload()).current().checks[0].note,"tab B draft");
+});
+
+const deviceCopies = (ui) => [...ui.deviceStorage.entries()]
+  .filter(([key]) => key.startsWith("msr-device-draft-v1:"))
+  .map(([key, raw]) => ({ key, ...JSON.parse(raw) }));
+const loseTabStorage = (ui) => ui.reload({ storage: new Map() });
+
+test("complete loss of tab storage offers the owner's full device draft after sign-in, with no import or cloud write", async () => {
+  const ui = await screen();
+  const cloud = structuredClone(ui.state.cloud);
+  const draft = workspace("FICTIONAL address-bar recovery");
+  draft.trips = [{departure:"2026-09-01",arrival:"2026-09-08",evidence:"fictional evidence",reviewer:"recover this unsaved reviewer",status:"User-reported"}];
+  draft.permissions = [{route:"Student",start:"2020-01-01",end:"2022-01-01",evidence:"fictional grant",status:"User-reported"}];
+  ui.editWorkspace(draft);
+  ui.state.response = () => Response.json({error:"Sign in again."},{status:401});
+  await ui.click("save");
+  const returned = await loseTabStorage(ui);
+  assert.equal(returned.$("workspaceEditor").hidden,true);
+  assert.match(returned.$("draftRecovery").textContent,/Sign in to review/);
+  assert.equal(returned.recoveryButtons().length,0);
+  assert.equal(returned.$("export").disabled,true);
+  await returned.signIn();
+  assert.deepEqual(returned.current(), cloud.data);
+  assert.equal(returned.recoveryButtons().length,1);
+  assert.equal(returned.state.confirmations.length,0);
+  await returned.recoveryButtons()[0].onclick();
+  assert.deepEqual(returned.current(), draft);
+  assert.deepEqual(returned.state.cloud, cloud);
+  assert.equal(returned.state.writes,0);
+  assert.equal(returned.$("saveFailure").hidden,false);
+  assert.equal(returned.$("export").disabled,false);
+  returned.edit("extra unsaved edit after recovery");
+  assert.equal(returned.$("saveFailure").hidden,false);
+  const finalDraft = returned.current();
+  await returned.click("save");
+  assert.deepEqual(returned.state.cloud.data, finalDraft);
+  assert.equal(returned.$("saveFailure").hidden,true);
+  assert.equal(returned.$("draftRecovery").hidden,true);
+  assert.equal(deviceCopies(returned).length,0);
+  const next = await loseTabStorage(returned);
+  await next.signIn();
+  assert.deepEqual(next.current(), finalDraft);
+  assert.equal(next.recoveryButtons().length,0);
+  assert.equal(next.$("download").disabled,true);
+  assert.equal(next.$("portal").disabled,true);
+});
+
+test("device recovery never renders another verified account's draft, while preserving it for its owner", async () => {
+  const a = await screen();
+  a.edit("owner A private device draft");
+  const stored = [...a.deviceStorage];
+  const bCloud = {...a.state.cloud, ownerId:"owner-b",data:workspace("owner B cloud")};
+  const b = await screen({},bCloud,{deviceStorage:a.deviceStorage,storage:new Map()});
+  await b.signIn();
+  assert.equal(b.recoveryButtons().length,0);
+  assert.equal(b.$("deviceRecovery").hidden,true);
+  assert.equal(b.current().checks[0].note,"owner B cloud");
+  assert.deepEqual([...a.deviceStorage],stored);
+  const returned = await loseTabStorage(a);
+  await returned.signIn();
+  await returned.recoveryButtons()[0].onclick();
+  assert.equal(returned.current().checks[0].note,"owner A private device draft");
+  assert.equal(returned.state.writes,0);
+});
+
+test("device recovery of an older cloud revision blocks overwrites and cancellation keeps all edits", async () => {
+  const ui = await screen();
+  ui.edit("older draft from Safari");
+  ui.state.cloud = {...ui.state.cloud, data:workspace("newer cloud record"), revision:newRevision};
+  const returned = await loseTabStorage(ui);
+  await returned.signIn();
+  await returned.recoveryButtons()[0].onclick();
+  assert.equal(returned.current().checks[0].note,"older draft from Safari");
+  assert.equal(returned.$("saveConflict").hidden,false);
+  assert.equal(returned.$("save").disabled,true);
+  await returned.click("save");
+  await returned.click("loadLatest"); // Cancel.
+  assert.equal(returned.current().checks[0].note,"older draft from Safari");
+  assert.equal(returned.state.cloud.data.checks[0].note,"newer cloud record");
+  assert.equal(returned.state.writes,0);
+  assert.ok(deviceCopies(returned).some(d=>d.data.checks[0].note==="older draft from Safari"));
+});
+
+test("separate tabs retain separate device drafts; saving one cannot delete the other's newer edits", async () => {
+  const deviceStorage = new Map();
+  const a = await screen({},undefined,{deviceStorage});
+  const b = await screen({},undefined,{deviceStorage});
+  a.edit("first tab snapshot");
+  b.edit("second tab snapshot");
+  const returned = await loseTabStorage(a);
+  await returned.signIn();
+  assert.equal(returned.recoveryButtons().length,2);
+  await returned.recoveryButtons()[0].onclick();
+  const recovered = returned.current().checks[0].note;
+  a.edit("first tab newer while recovery is open");
+  b.edit("second tab newer while recovery is open");
+  await returned.click("save");
+  const remaining = deviceCopies(returned).map(d=>d.data.checks[0].note);
+  assert.deepEqual(remaining.sort(),["first tab newer while recovery is open","second tab newer while recovery is open"].sort());
+  assert.equal(returned.state.cloud.data.checks[0].note,recovered);
+});
+
+test("cancelling recovery preserves the current unsaved draft and the older recovery choice", async () => {
+  const ui = await screen();
+  ui.edit("previous tab draft");
+  const returned = await loseTabStorage(ui);
+  await returned.signIn();
+  returned.edit("current on-screen draft");
+  await returned.recoveryButtons()[0].onclick(); // Cancel by default.
+  assert.match(returned.state.confirmations.at(-1),/Replace the on-screen edits/);
+  assert.equal(returned.current().checks[0].note,"current on-screen draft");
+  assert.equal(returned.state.writes,0);
+  assert.deepEqual(deviceCopies(returned).map(d=>d.data.checks[0].note).sort(),["previous tab draft","current on-screen draft"].sort());
+  returned.state.confirm=true;
+  await returned.recoveryButtons()[0].onclick();
+  assert.equal(returned.current().checks[0].note,"previous tab draft");
+  assert.ok(deviceCopies(returned).some(d=>d.data.checks[0].note==="current on-screen draft"));
+});
+
+test("blocked device storage still allows tab recovery with a truthful address-bar warning", async () => {
+  const ui = await screen({},undefined,{deviceReadBlocked:true,deviceWriteBlocked:true});
+  ui.edit("protected within this tab");
+  assert.match(ui.$("storageStatus").textContent,/recovery copy kept in this tab/);
+  assert.match(ui.$("draftRecovery").textContent,/storage is unavailable|before using Safari/);
+  assert.equal(deviceCopies(ui).length,0);
+  assert.equal((await ui.reload()).current().checks[0].note,"protected within this tab");
+});
+
+test("blocked tab storage still allows verified device recovery without storing credentials on the device", async () => {
+  const ui = await screen({},undefined,{storageReadBlocked:true,storageWriteBlocked:true});
+  await ui.signIn();
+  ui.edit("device-only recovery");
+  assert.match(ui.$("storageStatus").textContent,/recovery copy kept on this device/);
+  assert.equal(ui.deviceStorage.has("sp-session"),false);
+  for(const raw of ui.deviceStorage.values()) assert.doesNotMatch(raw,/fictional-session/);
+  const returned=await loseTabStorage(ui);
+  await returned.signIn();
+  await returned.recoveryButtons()[0].onclick();
+  assert.equal(returned.current().checks[0].note,"device-only recovery");
+  assert.equal(returned.state.writes,0);
+});
+
+test("a device quota failure protects the latest edit in tab storage and warns about the weaker protection", async () => {
+  const options={deviceWriteBlocked:false};
+  const ui=await screen({},undefined,options);
+  ui.edit("earlier device copy");
+  options.deviceWriteBlocked=true;
+  ui.edit("latest edit after device quota failure");
+  assert.match(ui.$("storageStatus").textContent,/kept in this tab/);
+  assert.match(ui.$("draftRecovery").textContent,/latest edit could not be kept on this device/);
+  const returned=await ui.reload();
+  assert.equal(returned.current().checks[0].note,"latest edit after device quota failure");
+  assert.equal(returned.state.writes,0);
+});
+
+test("corrupt, expired or future-dated device copies cannot appear as recoverable private records", async () => {
+  const ui=await screen();
+  ui.edit("old sensitive draft");
+  const [originalKey,raw]=[...ui.deviceStorage][0];
+  for(const invalid of ["{broken", JSON.stringify({...JSON.parse(raw),editedAt:Date.now()-8*86400000}),JSON.stringify({...JSON.parse(raw),editedAt:Date.now()+3600000})]) {
+    const returned=await screen({},ui.state.cloud,{deviceStorage:new Map([[originalKey,invalid]]),storage:new Map()});
+    await returned.signIn();
+    assert.equal(returned.recoveryButtons().length,0);
+    assert.equal(returned.current().checks[0].note,"baseline");
+    assert.equal(returned.state.writes,0);
+  }
+});
+
+test("sign-out cancellation preserves device drafts; confirmed sign-out clears only that account's copies", async () => {
+  const deviceStorage=new Map();
+  const a=await screen({},undefined,{deviceStorage});
+  const b=await screen({}, {...a.state.cloud,ownerId:"owner-b"},{deviceStorage});
+  a.edit("A draft");b.edit("B draft");
+  a.click("signOut");
+  assert.equal(deviceCopies(a).length,2);
+  a.state.confirm=true;
+  a.click("signOut");
+  assert.deepEqual(deviceCopies(a).map(d=>d.ownerId),["owner-b"]);
+  assert.equal(a.storage.has("sp-session"),false);
+  assert.equal(a.current().checks[0].note,"fictional demo");
+});
+
+test("failed removal after a successful save is reported without claiming the saved record was lost", async () => {
+  const options={deviceRemoveBlocked:false};
+  const ui=await screen({},undefined,options);
+  ui.edit("saved despite cleanup failure");
+  options.deviceRemoveBlocked=true;
+  await ui.click("save");
+  assert.equal(ui.state.cloud.data.checks[0].note,"saved despite cleanup failure");
+  assert.equal(ui.$("saveFailure").hidden,true);
+  assert.match(ui.$("message").textContent,/Workspace saved to your account/);
+  assert.match(ui.$("draftRecovery").textContent,/old recovery copy could not be removed/);
+  ui.state.confirm=true;
+  ui.click("signOut");
+  assert.match(ui.$("message").textContent,/could not be cleared/);
+  assert.equal(ui.storage.has("sp-session"),false);
+});
+
+test("device recovery retains newer input when the cloud check is slow, and survives a failed read", async () => {
+  const ui=await screen();ui.edit("waiting recovery draft");
+  const returned=await loseTabStorage(ui);await returned.signIn();
+  returned.state.response=()=>Response.json({error:"Unavailable"},{status:503});
+  await returned.recoveryButtons()[0].onclick();
+  assert.equal(returned.current().checks[0].note,"baseline");
+  assert.equal(returned.recoveryButtons().length,1);
+  returned.state.response=null;
+  const started=deferred(),waiting=deferred();
+  returned.state.hook=async()=>{started.resolve();await waiting.promise;};
+  const recovery=returned.recoveryButtons()[0].onclick();
+  await started.promise;
+  returned.edit("new input while recovery was loading");
+  waiting.resolve();await recovery;
+  assert.equal(returned.current().checks[0].note,"new input while recovery was loading");
+  assert.match(returned.$("message").textContent,/workspace changed/);
+  assert.equal(returned.state.writes,0);
+  assert.ok(deviceCopies(returned).some(d=>d.data.checks[0].note==="waiting recovery draft"));
+});
+
+test("device recovery stops if ownership changes during the cloud check", async () => {
+  const ui=await screen();ui.edit("owner A recovery draft");
+  const returned=await loseTabStorage(ui);await returned.signIn();
+  returned.state.cloud={...returned.state.cloud,ownerId:"owner-b"};
+  await returned.recoveryButtons()[0].onclick();
+  assert.equal(returned.current().checks[0].note,"baseline");
+  assert.match(returned.$("message").textContent,/workspace changed/);
+  assert.equal(returned.state.writes,0);
 });
