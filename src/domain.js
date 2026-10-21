@@ -129,10 +129,15 @@ export function validateWorkspace(s) {
     s.checks.length > 50
   )
     throw Error("Invalid workspace.");
-  if (s.period) {
+  if (s.period !== undefined) {
     if (
+      !s.period ||
       typeof s.period !== "object" ||
       Array.isArray(s.period) ||
+      (s.period.start !== undefined && typeof s.period.start !== "string") ||
+      (s.period.end !== undefined && typeof s.period.end !== "string") ||
+      (s.period.allTripsReported !== undefined && typeof s.period.allTripsReported !== "boolean") ||
+      (s.period.reconciled !== undefined && typeof s.period.reconciled !== "boolean") ||
       (s.period.start && dateDay(s.period.start) === null) ||
       (s.period.end && dateDay(s.period.end) === null) ||
       (s.period.start && s.period.end && s.period.end < s.period.start)
@@ -142,7 +147,7 @@ export function validateWorkspace(s) {
   for (const t of s.trips) {
     if (
       typeof t !== "object" ||
-      !t ||
+      !t || Array.isArray(t) ||
       typeof t.departure !== "string" ||
       typeof t.arrival !== "string" ||
       (t.departure && dateDay(t.departure) === null) ||
@@ -152,17 +157,20 @@ export function validateWorkspace(s) {
         (wholeDays(t.departure, t.arrival) === null ||
           wholeDays(t.departure, t.arrival) > 20000)) ||
       typeof t.evidence !== "string" ||
-      typeof t.status !== "string"
+      typeof t.status !== "string" ||
+      (t.reviewer !== undefined && typeof t.reviewer !== "string")
     )
       throw Error("Invalid trip.");
   }
   for (const p of s.permissions) {
     if (
       !p ||
-      typeof p !== "object" ||
+      typeof p !== "object" || Array.isArray(p) ||
       typeof p.route !== "string" ||
       typeof p.evidence !== "string" ||
       typeof p.status !== "string" ||
+      (p.start !== undefined && typeof p.start !== "string") ||
+      (p.end !== undefined && typeof p.end !== "string") ||
       (p.start && dateDay(p.start) === null) ||
       (p.end && dateDay(p.end) === null) ||
       (p.start && p.end && p.end < p.start)
@@ -172,7 +180,7 @@ export function validateWorkspace(s) {
   for (const c of s.checks) {
     if (
       !c ||
-      typeof c !== "object" ||
+      typeof c !== "object" || Array.isArray(c) ||
       typeof c.name !== "string" ||
       typeof c.status !== "string" ||
       typeof c.note !== "string"
@@ -181,7 +189,19 @@ export function validateWorkspace(s) {
   }
   if (JSON.stringify(s).length > 150000)
     throw Error("Workspace exceeds 150 KB.");
-  return s;
+  // Reconstruct the documented format at every import and cloud-save boundary.
+  // Do not keep hidden fields, account IDs or arbitrary nested JSON from a file.
+  const pick = (record, keys) => Object.fromEntries(
+    keys.filter((key) => Object.hasOwn(record, key)).map((key) => [key, record[key]]),
+  );
+  return {
+    version: 1,
+    route: s.route,
+    ...(s.period ? { period: pick(s.period, ["start", "end", "allTripsReported", "reconciled"]) } : {}),
+    trips: s.trips.map((t) => pick(t, ["departure", "arrival", "evidence", "status", "reviewer"])),
+    permissions: s.permissions.map((p) => pick(p, ["route", "start", "end", "evidence", "status"])),
+    checks: s.checks.map((c) => pick(c, ["name", "status", "note"])),
+  };
 }
 export function emptyWorkspace() {
   return {

@@ -24,6 +24,52 @@ const tester = {
   id: "00000000-0000-4000-8000-000000000002",
   email: "tester@example.com",
 };
+test("a closed invited account cannot request codes, verify codes or use an old session", async (t) => {
+  const calls = [];
+  const api = await running(t, async (url, options) => {
+    calls.push(url);
+    assert.ok(url.endsWith("/auth/v1/user"), "No workspace or OTP provider operation is permitted");
+    return Response.json(owner);
+  }, { ...settings, PREVIEW_CLOSED_EMAILS: " Owner@Example.COM " });
+  for (const data of [{ email: owner.email }, { email: owner.email, token: "123456" }]) {
+    const r = await api("auth/otp", "", data);
+    assert.equal(r.status, 403);
+    assert.match(await r.text(), /account is closed/);
+  }
+  assert.equal(calls.length, 0);
+  for (const [path, data] of [["workspace", undefined], ["workspace", emptyWorkspace()], ["workspace/delete", {}]]) {
+    const r = await api(path, "old_owner_token", data);
+    assert.equal(r.status, 403);
+    assert.match(await r.text(), /account is closed/);
+  }
+  assert.equal(calls.length, 3);
+  const text = await (await api("config", "")).text();
+  const config = JSON.parse(text);
+  assert.equal(config.privatePreview, true);
+  assert.equal(config.commerce, false);
+  assert.equal(config.sandboxCheckout, false);
+  assert.equal(text.includes(owner.email), false);
+});
+test("closure works with a single invitation without opening access or blocking other permitted accounts", async (t) => {
+  const blocked = await running(t, () => { throw Error("No provider requests expected"); }, {
+    ...settings, PREVIEW_ALLOWED_EMAILS: owner.email, PREVIEW_CLOSED_EMAILS: owner.email,
+  });
+  for (const email of [owner.email, tester.email])
+    assert.equal((await blocked("auth/otp", "", { email })).status, 403);
+  const api = await running(t, async () => Response.json({ access_token: "tester_token", user: tester }), {
+    ...settings, PREVIEW_CLOSED_EMAILS: owner.email,
+  });
+  assert.equal((await api("auth/otp", "", { email: tester.email, token: "123456" })).status, 200);
+  assert.throws(() => createApp({ ...settings, PREVIEW_CLOSED_EMAILS: "invalid" }), /closed-account list/);
+});
+test("provider cannot return a closed identity after verification for a different invited address", async (t) => {
+  const api = await running(t, async () => Response.json({ access_token: "must_not_return", user: owner }), {
+    ...settings, PREVIEW_CLOSED_EMAILS: owner.email,
+  });
+  const result = await api("auth/otp", "", { email: tester.email, token: "123456" });
+  assert.equal(result.status, 403);
+  assert.equal((await result.text()).includes("must_not_return"), false);
+});
 async function running(t, mock, env = settings) {
   const server = createApp(env, mock);
   server.listen(0, "127.0.0.1");
@@ -155,8 +201,11 @@ test("two invited accounts save, reload and delete only their own records withou
     evidence: "FICTIONAL preview backup test", status: "User-reported",
   }] };
   // A browser-supplied user_id must never choose the database owner.
-  assert.equal((await api("workspace", "owner_token", { ...workspace, user_id: tester.id }, { "If-None-Match": "*" })).status, 200);
+  assert.equal((await api("workspace", "owner_token", { ...workspace, user_id: tester.id,
+    hidden: { attachment: "Do not retain" }, trips: workspace.trips.map((trip) => ({ ...trip, hidden: "Do not retain" })),
+  }, { "If-None-Match": "*" })).status, 200);
   assert.equal(records.has(tester.id), false);
+  assert.deepEqual(records.get(owner.id).data, workspace, "Only documented workspace fields reach the database");
   const loaded = await (await api("workspace?user_id=" + tester.id)).json();
   assert.deepEqual(loaded.data.trips, workspace.trips);
   assert.ok(loaded.updated);

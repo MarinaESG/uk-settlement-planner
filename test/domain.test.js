@@ -13,6 +13,43 @@ const trip = (departure, arrival) => ({
   status: "Reviewed",
   evidence: "FICTIONAL evidence reference",
 });
+test("workspace validation strips undocumented fields at every level without mutating the backup", () => {
+  const expected = { ...emptyWorkspace(),
+    trips: [{ ...trip("2026-09-01", "2026-09-08"), reviewer: "Fictional reviewer" }],
+    permissions: [{ route: "Fictional", start: "", end: "", evidence: "Reference", status: "To check" }],
+  };
+  const original = structuredClone(expected);
+  original.user_id = "another-account";
+  original.privateAttachment = { secret: "Do not retain" };
+  original.period.hidden = { passport: "fictional" };
+  original.trips[0].passport = "fictional";
+  original.permissions[0].document = { content: "fictional" };
+  original.checks[0].unrelated = ["fictional"];
+  const unchanged = structuredClone(original);
+  const validated = validateWorkspace(original);
+  assert.deepEqual(validated, expected);
+  assert.deepEqual(original, unchanged);
+  validated.trips[0].reviewer = "Changed after validation";
+  assert.equal(original.trips[0].reviewer, "Fictional reviewer");
+});
+test("validation preserves supported incomplete and older backups exactly", () => {
+  const older = { version: 1, route: "long-residence", trips: [trip("", "")],
+    permissions: [{ route: "Fictional", evidence: "", status: "To check" }], checks: [] };
+  for (const backup of [emptyWorkspace(), older]) {
+    assert.deepEqual(validateWorkspace(JSON.parse(JSON.stringify(backup))), backup);
+  }
+});
+test("objects cannot be smuggled into optional text or boolean fields", () => {
+  for (const value of [null, false, 0, "", [], { start: {} }, { end: 0 },
+    { allTripsReported: "true" }, { reconciled: {} }]) {
+    assert.throws(() => validateWorkspace({ ...emptyWorkspace(), period: value }), /Invalid review period/);
+  }
+  assert.throws(() => validateWorkspace({ ...emptyWorkspace(),
+    trips: [{ ...trip("", ""), reviewer: { hidden: "value" } }] }), /Invalid trip/);
+  assert.throws(() => validateWorkspace({ ...emptyWorkspace(),
+    permissions: [{ route: "Example", evidence: "", status: "To check", start: [] }] }), /Invalid permission/);
+  assert.throws(() => validateWorkspace({ ...emptyWorkspace(), hidden: "x".repeat(150001) }), /150 KB/);
+});
 test("whole days exclude departure and arrival, including leap dates", () => {
   assert.equal(wholeDays("2020-02-28", "2020-03-01"), 1);
   assert.equal(wholeDays("2022-06-03", "2022-06-19"), 15);

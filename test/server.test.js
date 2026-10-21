@@ -15,6 +15,9 @@ test("unconfigured deployment cannot charge or expose private assets", async (t)
   for (const p of [
     "/.env",
     "/src/server.js",
+    "/src/account-closure.js",
+    "/scripts/review-account-closure.js",
+    "/docs/ACCOUNT-CLOSURE.md",
     "/supabase/schema.sql",
     "/dist/Settlement-Planner-UK.html",
     "/../.env",

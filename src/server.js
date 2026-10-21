@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { catalogue, sources } from "./catalogue.js";
 import { validateWorkspace, emptyWorkspace } from "./domain.js";
+import { closedPreviewEmails, closureMessage } from "./preview-closure.js";
 import {
   validSignature,
   priceMatches,
@@ -35,6 +36,9 @@ export function createApp(env = process.env, request = fetch) {
       .map(normaliseEmail)
       .filter(Boolean),
   );
+  // A separate block list permits closing the sole invited account without
+  // weakening the non-empty invitation guard. Empty by default; never public.
+  const closedEmails = closedPreviewEmails(env.PREVIEW_CLOSED_EMAILS);
   if (privatePreview) {
     if (
       !authReady ||
@@ -72,6 +76,8 @@ export function createApp(env = process.env, request = fetch) {
     throw e;
   }
   function checkPreviewIdentity(u) {
+    if (privatePreview && closedEmails.has(normaliseEmail(u?.email)))
+      fail(403, closureMessage);
     if (
       privatePreview &&
       (!u?.email_confirmed_at || !previewEmails.has(normaliseEmail(u.email)))
@@ -312,6 +318,8 @@ export function createApp(env = process.env, request = fetch) {
           fail(400, "Enter a valid email address.");
         if (privatePreview && !previewEmails.has(email))
           fail(403, "This email address is not invited to the private preview.");
+        if (privatePreview && closedEmails.has(email))
+          fail(403, closureMessage);
         const verifying = typeof d.token === "string";
         if (verifying && !/^\d{6,10}$/.test(d.token))
           fail(400, "Enter the code from your email.");
