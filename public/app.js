@@ -1,7 +1,60 @@
 import { mountPlanner, fictional, $, el } from "/planner.js";
 import { emptyWorkspace, validateWorkspace } from "/domain.js";
+const draftKey = "msr-tab-draft-v1";
+let draftStorageIssue = "",
+  draftKept = false,
+  draftRecovered = false;
+function sessionToken() {
+  try {
+    return sessionStorage.getItem("sp-session") || "";
+  } catch {
+    return "";
+  }
+}
+// Recover unfinished dates too; cloud saves still use strict date validation.
+function checkDraftData(data) {
+  const copy = structuredClone(data);
+  if (JSON.stringify(copy).length > 150000) throw Error("Draft too large");
+  const blankDates = (record, keys) => {
+    for (const key of keys) {
+      if (record[key] !== undefined && typeof record[key] !== "string")
+        throw Error("Invalid draft field");
+      record[key] = "";
+    }
+  };
+  if (copy.period) blankDates(copy.period, ["start", "end"]);
+  for (const trip of copy.trips) {
+    blankDates(trip, ["departure", "arrival"]);
+    if (trip.reviewer !== undefined && typeof trip.reviewer !== "string")
+      throw Error("Invalid reviewer");
+  }
+  for (const permission of copy.permissions)
+    blankDates(permission, ["start", "end"]);
+  validateWorkspace(copy);
+  return data;
+}
+function readTabDraft() {
+  try {
+    const raw = sessionStorage.getItem(draftKey);
+    if (!raw) return null;
+    if (raw.length > 152000) throw Error("Draft too large");
+    const draft = JSON.parse(raw);
+    if (
+      draft.version !== 1 ||
+      typeof draft.ownerId !== "string" || !draft.ownerId ||
+      !(draft.revision === null || typeof draft.revision === "string") ||
+      typeof draft.failed !== "boolean"
+    ) throw Error("Invalid draft");
+    checkDraftData(draft.data);
+    return draft;
+  } catch {
+    draftStorageIssue = "We couldn’t read a recovery copy in this tab. Keep any JSON backups. Browser draft recovery may be unavailable.";
+    return null;
+  }
+}
+let pendingDraft = readTabDraft();
 let config,
-  token = sessionStorage.getItem("sp-session") || "",
+  token = sessionToken(),
   product = "",
   revision,
   conflict = false,
@@ -47,13 +100,57 @@ async function api(path, method = "GET", data, headers = {}) {
 function message(e) {
   $("message").textContent = e.message || String(e);
 }
+function rememberDraft() {
+  // A demo or another account must never replace a waiting account's draft.
+  if (pendingDraft || !ownerId) return;
+  try {
+    if (dirty || !$("saveFailure").hidden) {
+      const data = checkDraftData(planner.get());
+      sessionStorage.setItem(draftKey, JSON.stringify({
+        version: 1, ownerId, revision, data, savedAt,
+        failed: !$("saveFailure").hidden,
+      }));
+      draftKept = true;
+      draftStorageIssue = "";
+    } else {
+      sessionStorage.removeItem(draftKey);
+      draftKept = false;
+      draftRecovered = false;
+    }
+  } catch {
+    draftKept = false;
+    draftStorageIssue = "This browser couldn’t keep a recovery copy of your latest edits. They are still on screen. Save to your account or export a JSON backup before refreshing.";
+    // Do not offer an older copy as if it contained the latest edit.
+    try { sessionStorage.removeItem(draftKey); } catch { /* Storage is blocked. */ }
+  }
+}
 function updateStatus() {
-  $("storageStatus").textContent = expired
+  if (pendingDraft?.failed) $("saveFailure").hidden = false;
+  rememberDraft();
+  $("draftRecovery").hidden = !(pendingDraft || draftKept || draftStorageIssue);
+  $("draftRecovery").textContent = pendingDraft
+    ? "An unsaved draft is waiting in this browser tab. Sign in to the same account to recover it. Your cloud records have not been changed."
+    : draftStorageIssue || (draftRecovered
+      ? expired
+        ? "Your unsaved draft was recovered after refresh. Sign in again to save it. Your cloud records have not been changed."
+        : conflict
+          ? "Your unsaved draft was recovered after refresh. A newer cloud version exists. Export this draft before loading the latest saved records."
+          : "Your unsaved draft was recovered after refresh. It has not been saved to your account. Review it, then choose Save to account."
+      : "A recovery copy of your unsaved edits is kept in this browser tab. It survives refresh; it is not a cloud save. Closing the tab or clearing browser data can remove it. Keep regular JSON backups.");
+  $("workspaceEditor").hidden = Boolean(pendingDraft);
+  for (const id of ["importButton", "export"])
+    $(id).disabled = Boolean(pendingDraft);
+  $("loadDemo").disabled = saving || Boolean(pendingDraft);
+  $("storageStatus").textContent = pendingDraft
+    ? "Unsaved draft waiting — sign in to recover"
+    : expired
     ? "Sign-in expired — edits remain on this page"
     : saving
       ? "Updating account records…"
       : dirty
-        ? "Unsaved changes — held on this page only"
+        ? draftKept
+          ? "Unsaved changes — recovery copy kept in this tab"
+          : "Unsaved changes — held on this page only"
         : authenticated
           ? "Loaded records match the last confirmed cloud version"
           : "Fictional demo — held on this page only";
@@ -68,11 +165,14 @@ function updateStatus() {
       : expired
         ? "Sign in again"
         : "Sign in";
-  $("signOut").hidden = !authenticated && !expired;
+  $("signOut").hidden = !authenticated && !expired && !pendingDraft;
   $("delete").hidden = !authenticated || expired;
   $("save").hidden = expired;
   $("save").disabled = saving || conflict || !authenticated;
-  $("resumeSignIn").hidden = !expired;
+  $("resumeSignIn").hidden = !expired && !pendingDraft;
+  $("resumeSignIn").textContent = pendingDraft
+    ? "Sign in to recover my draft"
+    : "Sign in again — keep my draft";
   $("resumeSignIn").disabled = saving;
 }
 if (typeof window !== "undefined")
@@ -137,6 +237,8 @@ async function account({ recoverOwner, started = changes } = {}) {
   if (!token) return;
   // Re-authentication checks ownership/revision without replacing tab memory.
   // This also protects edits made while the code or cloud read is in flight.
+  const waiting = pendingDraft;
+  recoverOwner = waiting?.ownerId || recoverOwner;
   const keepDraft = Boolean(recoverOwner);
   const session = token;
   const w = await (await api("workspace")).json();
@@ -159,7 +261,18 @@ async function account({ recoverOwner, started = changes } = {}) {
     throw Error(
       "Sign back in to the account that owns this draft. Your edits are still on this page; export a backup to keep them.",
     );
-  const newerCloud = keepDraft && w.revision !== revision;
+  if (waiting && started !== changes)
+    throw Error("Your on-screen changes are still here. Export them before recovering the earlier draft.");
+  const baseRevision = waiting ? waiting.revision : revision;
+  const newerCloud = keepDraft && w.revision !== baseRevision;
+  if (waiting) {
+    planner.set(structuredClone(waiting.data));
+    revision = waiting.revision;
+    dirty = true;
+    $("saveFailure").hidden = !waiting.failed;
+    draftRecovered = true;
+    pendingDraft = null;
+  }
   if (!keepDraft) {
     planner.set(w.data);
     dirty = false;
@@ -271,7 +384,7 @@ $("authForm").onsubmit = async (e) => {
   verifying = true;
   const attempt = ++authAttempt;
   const oldToken = token;
-  const recoverOwner = ownerId;
+  const recoverOwner = pendingDraft?.ownerId || ownerId;
   const started = changes;
   $("verifyCode").disabled = true;
   try {
@@ -294,7 +407,9 @@ $("authForm").onsubmit = async (e) => {
     token = a.token;
     if (!(await account({ recoverOwner, started })) || attempt !== authAttempt)
       return;
-    sessionStorage.setItem("sp-session", token);
+    try { sessionStorage.setItem("sp-session", token); } catch {
+      // The in-memory session works; recovery availability is shown separately.
+    }
     $("code").value = "";
     $("authMessage").textContent = "";
     $("auth").close();
@@ -335,6 +450,7 @@ $("save").onclick = () =>
     dirty = started !== changes;
     expired = false;
     clearSaveFailure();
+    draftStorageIssue = "";
     $("message").textContent =
       started === changes
         ? "Workspace saved to your account."
@@ -375,12 +491,20 @@ $("demoLink").onclick = () => {
 };
 $("signOut").onclick = () => {
   if (
-    dirty &&
+    (dirty || pendingDraft) &&
     !confirm(
       "Sign out and discard unsaved edits on this page? Cancel and export a JSON backup first to keep them.",
     )
   )
     return;
+  try { sessionStorage.removeItem(draftKey); } catch {
+    message("This browser could not clear its draft copy. Clear this site's browser data before leaving a shared device.");
+    return;
+  }
+  pendingDraft = null;
+  draftKept = false;
+  draftRecovered = false;
+  draftStorageIssue = "";
   authAttempt++;
   changes++;
   dirty = false;
@@ -391,7 +515,7 @@ $("signOut").onclick = () => {
   token = "";
   revision = undefined;
   setConflict(false);
-  sessionStorage.removeItem("sp-session");
+  try { sessionStorage.removeItem("sp-session"); } catch { /* Memory is cleared. */ }
   planner.set(fictional());
   clearSaveFailure();
   $("mode").textContent = "FICTIONAL DEMO · NOT SAVED";
@@ -495,6 +619,7 @@ $("download").onclick = () =>
       "Purchased planner downloaded. Import your JSON backup into it to transfer records.",
     );
   });
+updateStatus();
 try {
   config = await (await api("config")).json();
   $("routeCount").textContent = String(config.catalogue.length);
@@ -521,6 +646,8 @@ try {
     $("authHint").textContent =
       "Use the email address invited by the operator. Only invited, verified accounts can access the private preview.";
   }
+  $("dataHandling").textContent +=
+    " Unsaved account edits are also kept temporarily in this browser tab for refresh recovery when browser storage is available. This is not a cloud save or permanent backup. Signing out clears this copy; closing the tab or clearing browser data can remove it.";
   $("operator").textContent =
     "Operator: " +
     config.operator +

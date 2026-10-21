@@ -24,7 +24,8 @@ const deferred = () => {
 
 // Execute the actual connected-app controller with a small DOM/planner adapter.
 // Browser acceptance also checks the real form, export download and warning.
-async function screen(configOverrides = {}, initialCloud) {
+async function screen(configOverrides = {}, initialCloud, options = {}) {
+  const storage = options.storage || new Map([["sp-session", "fictional-session"]]);
   const nodes = new Map();
   const $ = (id) => {
     if (!nodes.has(id))
@@ -66,7 +67,7 @@ async function screen(configOverrides = {}, initialCloud) {
     confirm: false,
     confirmations: [],
     hook: null,
-    response: null,
+    response: options.response || null,
     acknowledge: null,
   };
   let current, changed;
@@ -145,9 +146,15 @@ async function screen(configOverrides = {}, initialCloud) {
       },
     },
     sessionStorage: {
-      getItem: () => "fictional-session",
-      setItem() {},
-      removeItem() {},
+      getItem: (key) => {
+        if (options.storageReadBlocked) throw Error("Storage blocked");
+        return storage.get(key) || null;
+      },
+      setItem: (key, value) => {
+        if (options.storageWriteBlocked) throw Error("Storage full");
+        storage.set(key, value);
+      },
+      removeItem: (key) => storage.delete(key),
     },
     confirm: (message) => {
       state.confirmations.push(message);
@@ -157,11 +164,19 @@ async function screen(configOverrides = {}, initialCloud) {
   return {
     $,
     state,
+    storage,
     current: () => structuredClone(current),
     edit: (note) => {
       current.checks[0].note = note;
       changed(current);
     },
+    editWorkspace: (data) => {
+      current = structuredClone(data);
+      changed(current);
+    },
+    reload: (overrides = {}) => screen(configOverrides, state.cloud, {
+      ...options, storage, ...overrides,
+    }),
     click: (id) => $(id).onclick(),
     signIn: () => $("authForm").onsubmit({ preventDefault() {} }),
   };
@@ -609,4 +624,192 @@ test("leaving with a dirty draft requests the browser warning; successful save r
   await ui.click("save");
   ui.state.unload(event);
   assert.equal(prevented, 1);
+});
+
+test("refresh recovers every draft field without a cloud write or backup import, then successful save removes the copy", async () => {
+  const ui = await screen();
+  const baseline = structuredClone(ui.state.cloud);
+  const draft = workspace("FICTIONAL refresh draft");
+  draft.trips = [{ departure: "2026-09-01", arrival: "2026-09-08", evidence: "fictional evidence", reviewer: "typed without leaving field", status: "User-reported" }];
+  draft.permissions = [{route: "fictional permission", start: "2025-01-01", end: "2027-01-01", evidence: "fictional grant", status: "User-reported"}];
+  ui.editWorkspace(draft);
+  assert.match(ui.$("storageStatus").textContent, /recovery copy kept/);
+  const reloaded = await ui.reload();
+  assert.deepEqual(reloaded.current(), draft);
+  assert.deepEqual(reloaded.state.cloud, baseline);
+  assert.equal(reloaded.state.writes, 0);
+  assert.equal(reloaded.$("save").disabled, false);
+  assert.equal(reloaded.$("workspaceEditor").hidden, false);
+  assert.equal(reloaded.$("draftRecovery").hidden, false);
+  assert.match(reloaded.$("draftRecovery").textContent, /recovered after refresh/);
+  reloaded.edit("edit after recovery");
+  assert.match(reloaded.$("draftRecovery").textContent, /not been saved to your account/);
+  await reloaded.click("save");
+  assert.deepEqual(reloaded.state.cloud.data, reloaded.current());
+  assert.equal(reloaded.storage.has("msr-tab-draft-v1"), false);
+  assert.equal(reloaded.$("draftRecovery").hidden, true);
+  const savedReload = await reloaded.reload();
+  assert.deepEqual(savedReload.current(), reloaded.current());
+  assert.equal(savedReload.$("draftRecovery").hidden, true);
+});
+
+test("expired session after refresh hides account data until matching sign-in, then restores draft and failure warning", async () => {
+  const ui = await screen();
+  ui.edit("private recovered draft");
+  ui.state.response = () => Response.json({error:"Sign in again."},{status:401});
+  await ui.click("save");
+  const reloaded = await ui.reload({response:ui.state.response});
+  assert.equal(reloaded.current().checks[0].note, "fictional demo");
+  assert.equal(reloaded.$("workspaceEditor").hidden, true);
+  assert.equal(reloaded.$("importButton").disabled, true);
+  assert.equal(reloaded.$("export").disabled, true);
+  assert.equal(reloaded.$("save").disabled, true);
+  assert.match(reloaded.$("draftRecovery").textContent, /same account/);
+  assert.equal(reloaded.$("saveFailure").hidden, false);
+  reloaded.state.response = null;
+  await reloaded.signIn();
+  assert.deepEqual(reloaded.current(), ui.current());
+  assert.equal(reloaded.state.confirmations.length, 0);
+  assert.equal(reloaded.$("saveFailure").hidden, false);
+  assert.equal(reloaded.$("export").disabled, false);
+  assert.equal(reloaded.state.writes, 0);
+  await reloaded.click("save");
+  assert.equal(reloaded.$("saveFailure").hidden, true);
+  assert.equal(reloaded.storage.has("msr-tab-draft-v1"), false);
+});
+
+test("a newer cloud revision after refresh leaves the entire draft recoverable and saving blocked", async () => {
+  const ui = await screen();
+  ui.edit("older unsaved draft");
+  ui.state.cloud = {...ui.state.cloud, data:workspace("newer saved record"), revision:newRevision};
+  const reloaded = await ui.reload();
+  assert.deepEqual(reloaded.current(), ui.current());
+  assert.equal(reloaded.$("saveConflict").hidden, false);
+  assert.match(reloaded.$("draftRecovery").textContent, /newer cloud version/);
+  assert.equal(reloaded.$("save").disabled, true);
+  await reloaded.click("save");
+  await reloaded.click("loadLatest"); // Cancel must retain both screen and copy.
+  assert.equal(reloaded.state.writes, 0);
+  assert.deepEqual((await reloaded.reload()).current(), ui.current());
+  reloaded.state.confirm = true;
+  await reloaded.click("loadLatest");
+  assert.equal(reloaded.current().checks[0].note, "newer saved record");
+  assert.equal(reloaded.storage.has("msr-tab-draft-v1"), false);
+});
+
+test("another verified account cannot view or acquire a stored draft; the owner can recover it later", async () => {
+  const ui = await screen();
+  ui.edit("owner A private draft");
+  const ownerCloud = structuredClone(ui.state.cloud);
+  ui.state.cloud = {...ui.state.cloud,ownerId:"owner-b",data:workspace("owner B cloud")};
+  const reloaded = await ui.reload();
+  assert.equal(reloaded.current().checks[0].note, "fictional demo");
+  assert.equal(reloaded.$("workspaceEditor").hidden, true);
+  assert.match(reloaded.$("message").textContent, /account that owns this draft/);
+  assert.equal(reloaded.$("save").disabled, true);
+  reloaded.state.cloud = ownerCloud;
+  await reloaded.signIn();
+  assert.equal(reloaded.current().checks[0].note, "owner A private draft");
+  assert.equal(reloaded.state.writes, 0);
+});
+
+test("draft survives absent session credentials and restores only after owner sign-in", async () => {
+  const ui = await screen();
+  ui.edit("recover after sign-in");
+  ui.storage.delete("sp-session");
+  const reloaded = await ui.reload();
+  assert.equal(reloaded.state.reads, 0);
+  assert.equal(reloaded.$("workspaceEditor").hidden, true);
+  await reloaded.signIn();
+  assert.equal(reloaded.current().checks[0].note, "recover after sign-in");
+  assert.equal(reloaded.state.confirmations.length, 0);
+});
+
+test("unfinished date edits survive refresh but strict cloud save validation still rejects them", async () => {
+  const ui = await screen();
+  const draft = workspace("dates being edited");
+  draft.trips = [{departure:"2026-09-09",arrival:"2026-09-08",evidence:"fictional",status:"User-reported",reviewer:"preserve all input"}];
+  draft.period.start = "2026-10-01";
+  draft.period.end = "2026-09-01";
+  ui.editWorkspace(draft);
+  const reloaded = await ui.reload();
+  assert.deepEqual(reloaded.current(),draft);
+  await reloaded.click("save");
+  assert.equal(reloaded.state.writes,0);
+  assert.match(reloaded.$("message").textContent,/Invalid review period/);
+});
+
+test("storage quota failure is explicit and an older recovery copy is not mistaken for the latest draft", async () => {
+  const options = {storageWriteBlocked:false};
+  const ui = await screen({},undefined,options);
+  ui.edit("old edit");
+  options.storageWriteBlocked = true;
+  ui.edit("latest edit after quota failure");
+  assert.equal(ui.current().checks[0].note,"latest edit after quota failure");
+  assert.equal(ui.storage.has("msr-tab-draft-v1"),false);
+  assert.equal(ui.$("draftRecovery").hidden,false);
+  assert.match(ui.$("draftRecovery").textContent,/couldn’t keep a recovery copy/);
+  assert.doesNotMatch(ui.$("storageStatus").textContent,/recovery copy kept/);
+  await ui.click("save");
+  assert.equal(ui.state.cloud.data.checks[0].note,"latest edit after quota failure");
+  assert.equal(ui.$("draftRecovery").hidden,true);
+});
+
+test("blocked storage does not crash the app or claim draft protection", async () => {
+  const ui = await screen({},undefined,{storageReadBlocked:true,storageWriteBlocked:true});
+  assert.equal(ui.$("save").disabled,true);
+  assert.match(ui.$("draftRecovery").textContent,/recovery may be unavailable/);
+  await ui.signIn();
+  ui.edit("in memory only");
+  assert.equal(ui.current().checks[0].note,"in memory only");
+  assert.match(ui.$("draftRecovery").textContent,/couldn’t keep a recovery copy/);
+});
+
+test("malformed recovery content is not rendered and the cloud copy remains intact", async () => {
+  for (const corrupt of ['{broken','{"version":99}',JSON.stringify({version:1,ownerId:"owner-a",revision:oldRevision,failed:false,data:{version:1,trips:null}})]) {
+    const ui = await screen({},undefined,{storage:new Map([["sp-session","fictional-session"],["msr-tab-draft-v1",corrupt]])});
+    assert.equal(ui.current().checks[0].note,"baseline");
+    assert.equal(ui.state.writes,0);
+    assert.match(ui.$("draftRecovery").textContent,/couldn’t read a recovery copy/);
+  }
+});
+
+test("confirmed sign-out removes the tab draft and cannot expose it to a later account", async () => {
+  const ui = await screen();
+  ui.edit("private draft");
+  ui.click("signOut"); // Cancel.
+  assert.equal(ui.storage.has("msr-tab-draft-v1"),true);
+  ui.state.confirm = true;
+  ui.click("signOut");
+  assert.equal(ui.storage.has("msr-tab-draft-v1"),false);
+  assert.equal(ui.storage.has("sp-session"),false);
+  const reloaded = await ui.reload();
+  assert.equal(reloaded.current().checks[0].note,"fictional demo");
+  assert.equal(reloaded.$("draftRecovery").hidden,true);
+});
+
+test("edits made while a save is in flight survive refresh with the acknowledged base revision", async () => {
+  const ui = await screen();
+  ui.edit("submitted");
+  const waiting = deferred(), started = deferred();
+  ui.state.hook = async () => {started.resolve();await waiting.promise;};
+  const saving = ui.click("save");
+  await started.promise;
+  ui.edit("newest keystrokes");
+  waiting.resolve();
+  await saving;
+  const reloaded = await ui.reload();
+  assert.equal(reloaded.current().checks[0].note,"newest keystrokes");
+  assert.equal(reloaded.state.cloud.data.checks[0].note,"submitted");
+  assert.equal(reloaded.$("saveConflict").hidden,true);
+  await reloaded.click("save");
+  assert.equal(reloaded.state.cloud.data.checks[0].note,"newest keystrokes");
+});
+
+test("independent tabs keep separate recovery drafts", async () => {
+  const a = await screen(), b = await screen();
+  a.edit("tab A draft");
+  b.edit("tab B draft");
+  assert.equal((await a.reload()).current().checks[0].note,"tab A draft");
+  assert.equal((await b.reload()).current().checks[0].note,"tab B draft");
 });

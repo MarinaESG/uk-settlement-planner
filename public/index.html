@@ -141,6 +141,7 @@
           ><button id="delete">Delete saved workspace</button
           ><button id="signOut">Sign out</button>
         </div>
+        <p id="draftRecovery" class="notice" role="status" hidden></p>
         <p id="message" role="status" aria-live="polite"></p>
         <p id="saveFailure" class="notice save-warning" role="alert" hidden>
           We couldn’t confirm that your changes were saved to your account.
@@ -157,6 +158,7 @@
           </p>
           <button id="loadLatest">Load latest saved records</button>
         </div>
+        <div id="workspaceEditor">
         <label>Planning route<select id="route"></select></label>
         <p id="routeNote" class="notice"></p>
         <div class="tabs" role="group" aria-label="Workspace sections">
@@ -171,6 +173,7 @@
           numbers, upload identity documents, or record sensitive case
           narratives. Evidence review labels are your own assessments.
         </p>
+        </div>
       </section>
       <section class="boundaries">
         <div>
